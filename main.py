@@ -38,30 +38,31 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def download_monitoring_data(service):
-    print(f"Connecting to Drive Folder: {DRIVE_FOLDER_ID}...")
+    print(f"Connecting to Drive Folder: {DRIVE_FOLDER_ID}...", flush=True)
     try:
-        # Removed mimeType filter to allow .parquet files
         results = service.files().list(
             q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
             fields="files(id, name)"
         ).execute()
     except Exception as e:
-        print(f"Error connecting to Drive: {e}")
+        print(f"Error connecting to Drive: {e}", flush=True)
         return pd.DataFrame()
     
     files = results.get('files', [])
+    total_files = len(files)
     all_data = []
-    print(f"Found {len(files)} files. Downloading & Processing...")
+    print(f"Found {total_files} files. Starting download...", flush=True)
     
-    for file in files:
+    for index, file in enumerate(files):
         file_name = file['name'].lower()
         
         # Skip non-data files
         if not (file_name.endswith('.xlsx') or file_name.endswith('.parquet')):
             continue
 
+        print(f"[{index + 1}/{total_files}] Processing {file['name']}...", flush=True)
+
         try:
-            # Download file to memory
             request = service.files().get_media(fileId=file['id'])
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
@@ -72,15 +73,15 @@ def download_monitoring_data(service):
             
             df = pd.DataFrame()
 
-            # --- OPTION A: PARQUET (Fast & Clean) ---
+            # --- OPTION A: PARQUET (Fast) ---
             if file_name.endswith('.parquet'):
                 try:
                     df = pd.read_parquet(fh)
                 except Exception as pq_err:
-                    print(f"    ⚠ Error reading parquet {file['name']}: {pq_err}")
+                    print(f"    ⚠ Error reading parquet: {pq_err}", flush=True)
                     continue
 
-            # --- OPTION B: EXCEL (With Header Detection) ---
+            # --- OPTION B: EXCEL (Slow but Robust) ---
             elif file_name.endswith('.xlsx'):
                 header_row_index = 0
                 try:
@@ -94,16 +95,14 @@ def download_monitoring_data(service):
                             found_header = True
                             break
                     if not found_header:
-                        print(f"    ⚠ Skipped {file['name']} (Header not found)")
+                        print(f"    ⚠ Skipped (Header not found)", flush=True)
                         continue
                 except: continue
 
-                # Read Actual Data
                 fh.seek(0)
                 df = pd.read_excel(fh, header=header_row_index, engine='openpyxl')
 
-            # --- COMMON CLEANUP ---
-            # Clean columns
+            # --- CLEANUP ---
             df.columns = [str(col).replace('\ufeff', '').strip() for col in df.columns]
             
             if 'Site' in df.columns and 'Date' in df.columns and 'Solar Supply (kWh)' in df.columns:
@@ -117,11 +116,13 @@ def download_monitoring_data(service):
                 all_data.append(temp_df)
                 
         except Exception as e:
-            print(f"Skipping {file['name']}: {e}")
+            print(f"    ⚠ Error: {e}", flush=True)
 
     if not all_data:
+        print("No valid data found.", flush=True)
         return pd.DataFrame()
         
+    print("Combining data...", flush=True)
     combined = pd.concat(all_data, ignore_index=True)
     combined = combined.sort_values('Date').drop_duplicates(subset=['Site_ID', 'Date'], keep='last')
     pivot_df = combined.pivot(index='Site_ID', columns='Date', values='Solar_kWh').reset_index()
@@ -129,9 +130,9 @@ def download_monitoring_data(service):
 
 def process_data(pivot_df):
     """Combines Metadata and calculates stats"""
-    print("Loading Metadata and Calculating Stats...")
+    print("Loading Metadata and Calculating Stats...", flush=True)
     if not os.path.exists(METADATA_FILE):
-        print(f"Metadata not found at {METADATA_FILE}")
+        print(f"Metadata not found at {METADATA_FILE}", flush=True)
         return pd.DataFrame(), []
 
     meta_df = pd.read_excel(METADATA_FILE)
@@ -182,10 +183,11 @@ def process_data(pivot_df):
 
 def generate_html(df, date_cols):
     """Generates the Full Dashboard using Logic from Your Original Script"""
-    print("Performing Advanced Analysis & Generating HTML...")
+    print("Performing Advanced Analysis & Generating HTML...", flush=True)
 
     # --- FIX: Calculate active sites BEFORE using it ---
     active_sites = df['Total_Production'].notna().sum()
+    # -------------------------------------------------
 
     # Load Additional Info
     site_name_map = {}
@@ -488,6 +490,7 @@ def generate_html(df, date_cols):
     </div>
 
     <script>
+        // Data Injection
         const siteData = {json.dumps(site_data)};
         const degData = {json.dumps(degradation_df.to_dict('records') if not degradation_df.empty else [])};
         const gridData = {json.dumps(grid_access_stats.to_dict('records'))};
@@ -618,7 +621,7 @@ def generate_html(df, date_cols):
     
     with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
         f.write(html_content)
-    print(f"Full Dashboard generated: {OUTPUT_HTML}")
+    print(f"Full Dashboard generated: {OUTPUT_HTML}", flush=True)
 
 def main():
     service = get_drive_service()
@@ -628,7 +631,7 @@ def main():
         final_df, date_cols = process_data(pivot_df)
         generate_html(final_df, date_cols)
     else:
-        print("No data found to process.")
+        print("No data found to process.", flush=True)
 
 if __name__ == "__main__":
     main()
