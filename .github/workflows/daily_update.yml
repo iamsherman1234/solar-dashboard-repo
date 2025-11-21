@@ -30,46 +30,29 @@ jobs:
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
         run: python -u main.py
 
-      # --- RENAME & PREPARE RELEASE FILES ---
-      - name: Prepare Release Files
+      # --- PREPARE RELEASE FILES ---
+      - name: Prepare Release Archives
         run: |
-          # Get current date string (e.g., 21112025)
           DATE_STR=$(date +'%d%m%Y')
+          ZIP_NAME="Solar_Report_${DATE_STR}.zip"
           
-          # 1. Rename HTML File
-          # We copy instead of move so 'index.html' stays for the website deploy step
-          cp index.html "${DATE_STR}_solar_dashboard.html"
+          # 1. Copy files to dated versions (for internal ref if needed, but we zip generics)
+          # Actually, we just zip the generic files directly into a dated zip.
+          # This ensures the HTML inside looks for "dashboard_data.json" (generic) which exists inside the zip.
           
-          # 2. Rename Data File (if it exists)
-          if [ -f dashboard_data.json ]; then
-            cp dashboard_data.json "${DATE_STR}_dashboard_data.json"
-            echo "DATA_NAME=${DATE_STR}_dashboard_data.json" >> $GITHUB_ENV
-          else
-            echo "DATA_NAME=" >> $GITHUB_ENV
-          fi
+          zip -r $ZIP_NAME index.html dashboard_data.json
           
-          # Save variables for next steps
-          echo "REPORT_NAME=${DATE_STR}_solar_dashboard.html" >> $GITHUB_ENV
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
           echo "TAG_NAME=report-${DATE_STR}" >> $GITHUB_ENV
 
-      # --- OPTIONAL: UPLOAD ARTIFACT (For easy download from Actions tab) ---
-      - name: Upload HTML Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-report
-          path: ${{ env.REPORT_NAME }}
-          retention-days: 30
-
-      # --- CREATE GITHUB RELEASE (Archives the files) ---
+      # --- CREATE RELEASE (ZIP ONLY) ---
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG_NAME }}
-          name: "Solar Dashboard: ${{ env.REPORT_NAME }}"
-          files: |
-            ${{ env.REPORT_NAME }}
-            ${{ env.DATA_NAME }}
-          body: "Automated weekly solar performance report."
+          name: "Solar Report: ${{ env.ZIP_NAME }}"
+          files: ${{ env.ZIP_NAME }}
+          body: "Download the ZIP file to view the full interactive dashboard offline."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -79,8 +62,9 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./
-          # We exclude source code but KEEP index.html and dashboard_data.json
-          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,temp_master.parquet,requirements.txt,${{ env.REPORT_NAME }},${{ env.DATA_NAME }}'
+          # EXCLUDE: Zip files, dated HTML/JSON copies, source code, config files
+          # INCLUDE: Generic index.html and dashboard_data.json (implicitly included by NOT being in this list)
+          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,temp_master.parquet,requirements.txt,*.zip'
           destination_dir: ./
           keep_files: true
           user_name: 'SolarBot'
