@@ -10,7 +10,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # --- CONFIGURATION ---
 MONITORING_FOLDER_ID = '1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm' 
-ARCHIVE_FOLDER_ID    = 'PASTE_YOUR_ARCHIVE_FOLDER_ID_HERE' 
+ARCHIVE_FOLDER_ID    = '19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G' 
 
 # FILE NAMES
 MASTER_FILENAME = 'all_monitoring_data.parquet'
