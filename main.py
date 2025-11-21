@@ -9,20 +9,27 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 # --- CONFIGURATION ---
-# PASTE YOUR FOLDER ID HERE
 DRIVE_FOLDER_ID = '1jhw0IRHwG8ogRCL9g9Qu3RAsN0gkNLPI' 
 
-# Paths (Using ".." to go up from src to root)
+# Paths
 METADATA_FILE = os.path.join(os.path.dirname(__file__), '../data/sites_metadata.xlsx')
 ADDITIONAL_INFO = os.path.join(os.path.dirname(__file__), '../data/additional_site_info.csv')
 OUTPUT_HTML = 'index.html'
 
+# Province Mapping
+PROVINCE_MAPPING = {
+    'SV': 'Sihanoukville', 'KK': 'Koh Kong', 'SI': 'Siem Reap', 'PV': 'Prey Veng',
+    'SR': 'Svay Rieng', 'KD': 'Kandal', 'KS': 'Kampong Speu', 'KC': 'Kampong Cham',
+    'KH': 'Kampong Chhnang', 'BB': 'Battambang', 'PS': 'Pursat', 'PH': 'Preah Vihear',
+    'KT': 'Kampong Thom', 'PL': 'Pailin', 'BM': 'Banteay Meanchey', 'TB': 'Tboung Khmum',
+    'OM': 'Oddar Meanchey', 'KP': 'Kampot', 'KE': 'Kep', 'KR': 'Kratie',
+    'ST': 'Stung Treng', 'MK': 'Mondulkiri', 'RK': 'Ratanakiri', 'PP': 'Phnom Penh', 'TK': 'Takeo'
+}
+
 def get_drive_service():
-    """Authenticate with Google Drive"""
     creds_json = os.environ.get('GDRIVE_CREDENTIALS')
     if not creds_json:
         raise ValueError("GDRIVE_CREDENTIALS secret not found!")
-    
     creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(
         creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
@@ -30,7 +37,6 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def download_monitoring_data(service):
-    """Downloads files and uses Robust Header Detection"""
     print(f"Connecting to Drive Folder: {DRIVE_FOLDER_ID}...")
     try:
         results = service.files().list(
@@ -47,8 +53,6 @@ def download_monitoring_data(service):
     
     for file in files:
         try:
-            print(f"  Downloading {file['name']}...")
-            # Download file to memory
             request = service.files().get_media(fileId=file['id'])
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
@@ -56,96 +60,53 @@ def download_monitoring_data(service):
             while done is False:
                 status, done = downloader.next_chunk()
             
-            # --- ROBUST HEADER DETECTION PATCH START ---
+            # Robust Header Detection
             header_row_index = 0
-            
-            # 1. Reset pointer to start
             fh.seek(0)
-            
-            # 2. Scan first 50 rows to find where data starts
             try:
-                # Read without header first
                 df_test = pd.read_excel(fh, header=None, nrows=50, engine='openpyxl')
-                
                 found_header = False
                 for i, row in df_test.iterrows():
-                    # Create list of strings for this row to check contents
                     row_values = [str(val).strip() for val in row.values]
-                    
-                    # Check for your specific keywords
                     if 'Site' in row_values and 'Solar Supply (kWh)' in row_values:
                         header_row_index = i
                         found_header = True
                         break
-                
                 if not found_header:
-                    print(f"    ⚠ Could not find 'Site' and 'Solar Supply' headers in {file['name']}")
+                    print(f"    ⚠ Skipped {file['name']} (No header found)")
                     continue
-                    
-            except Exception as scan_error:
-                print(f"    ⚠ Error scanning {file['name']}: {scan_error}")
-                continue
+            except: continue
 
-            # 3. Reset pointer again to read the actual data
             fh.seek(0)
-            
-            # 4. Read the full file using the found header index
             df = pd.read_excel(fh, header=header_row_index, engine='openpyxl')
-            
-            # --- ROBUST HEADER DETECTION PATCH END ---
-
-            # Clean columns (remove hidden characters/spaces)
             df.columns = [str(col).replace('\ufeff', '').strip() for col in df.columns]
             
-            # Logic from Script 1: Extract Site, Date, Solar
             if 'Site' in df.columns and 'Date' in df.columns and 'Solar Supply (kWh)' in df.columns:
-                
-                # Handle "Site" vs "Site ID"
-                if 'Site ID' in df.columns:
-                    site_col = 'Site ID'
-                else:
-                    site_col = 'Site'
-                
+                site_col = 'Site ID' if 'Site ID' in df.columns else 'Site'
                 temp_df = df[[site_col, 'Date', 'Solar Supply (kWh)']].copy()
                 temp_df.columns = ['Site_ID', 'Date', 'Solar_kWh']
-                
-                # Conversions
                 temp_df['Date'] = pd.to_datetime(temp_df['Date'], errors='coerce')
                 temp_df['Solar_kWh'] = pd.to_numeric(temp_df['Solar_kWh'], errors='coerce')
                 temp_df['Site_ID'] = temp_df['Site_ID'].astype(str).str.strip()
-                
-                # Drop rows with invalid dates
                 temp_df = temp_df.dropna(subset=['Date'])
-                
                 all_data.append(temp_df)
-            else:
-                print(f"    ⚠ Missing required columns in {file['name']}")
-                
         except Exception as e:
             print(f"Skipping {file['name']}: {e}")
 
     if not all_data:
         return pd.DataFrame()
         
-    # Combine and Remove Duplicates
     combined = pd.concat(all_data, ignore_index=True)
     combined = combined.sort_values('Date').drop_duplicates(subset=['Site_ID', 'Date'], keep='last')
-    
-    # Pivot
     pivot_df = combined.pivot(index='Site_ID', columns='Date', values='Solar_kWh').reset_index()
     return pivot_df
 
 def process_data(pivot_df):
-    """Combines Metadata and calculates stats"""
     print("Loading Metadata and Calculating Stats...")
-    
     if not os.path.exists(METADATA_FILE):
-        print("Metadata file not found!")
         return pd.DataFrame(), []
 
     meta_df = pd.read_excel(METADATA_FILE)
-    
-    # Clean Site ID
     if 'Split' in meta_df.columns:
         meta_df['Site_ID'] = meta_df['Split'].astype(str).str.strip()
     else:
@@ -155,151 +116,365 @@ def process_data(pivot_df):
     def calculate_array_size(row):
         try:
             return (float(row['Panels']) * float(row['Panel Size'])) / 1000
-        except:
-            return 0
+        except: return 0
     meta_df['Array_Size_kWp'] = meta_df.apply(calculate_array_size, axis=1)
 
-    # Create Panel Description
+    # Panel Description
     def create_desc(row):
-        try:
-            return f"{row['Panel Size']}W {row['Panel Vendor']} {row['Panel Model']}"
-        except:
-            return "Unknown"
+        try: return f"{row['Panel Size']}W {row['Panel Vendor']} {row['Panel Model']}"
+        except: return "Unknown"
     meta_df['Panel_Description'] = meta_df.apply(create_desc, axis=1)
 
     # Merge
     final_df = meta_df.merge(pivot_df, on='Site_ID', how='left')
 
-    # Calculate Stats
+    # Calculate Basic Stats
     date_cols = [c for c in final_df.columns if isinstance(c, pd.Timestamp)]
-    
     if date_cols:
         latest_date = max(date_cols)
+        cols_7d = [c for c in date_cols if c >= latest_date - pd.Timedelta(days=7)]
+        cols_30d = [c for c in date_cols if c >= latest_date - pd.Timedelta(days=30)]
+        cols_90d = [c for c in date_cols if c >= latest_date - pd.Timedelta(days=90)]
         
-        # Windows
-        date_7d = latest_date - pd.Timedelta(days=7)
-        date_30d = latest_date - pd.Timedelta(days=30)
+        final_df['Prod_7d_kWh'] = final_df[cols_7d].sum(axis=1)
+        final_df['Avg_Yield_7d_kWh_kWp'] = (final_df[cols_7d].mean(axis=1) / final_df['Array_Size_kWp']).fillna(0)
         
-        cols_7d = [c for c in date_cols if c >= date_7d]
-        cols_30d = [c for c in date_cols if c >= date_30d]
-        
-        # 30-Day Stats
         final_df['Prod_30d_kWh'] = final_df[cols_30d].sum(axis=1)
-        final_df['Avg_Daily_30d_kWh'] = final_df[cols_30d].mean(axis=1)
-        final_df['Avg_Yield_30d_kWh_kWp'] = final_df['Avg_Daily_30d_kWh'] / final_df['Array_Size_kWp']
+        final_df['Avg_Yield_30d_kWh_kWp'] = (final_df[cols_30d].mean(axis=1) / final_df['Array_Size_kWp']).fillna(0)
         
-        # All Time
+        final_df['Prod_90d_kWh'] = final_df[cols_90d].sum(axis=1)
+        final_df['Avg_Yield_90d_kWh_kWp'] = (final_df[cols_90d].mean(axis=1) / final_df['Array_Size_kWp']).fillna(0)
+        
         final_df['Total_Production'] = final_df[date_cols].sum(axis=1)
+        final_df['Days_With_Data'] = final_df[date_cols].notna().sum(axis=1)
+        final_df['Avg_Daily_Production_kWh'] = final_df[date_cols].mean(axis=1)
 
-    rename_map = {c: c.strftime('%Y-%m-%d') for c in date_cols}
-    final_df = final_df.rename(columns=rename_map)
-    str_date_cols = list(rename_map.values())
-    
-    return final_df, str_date_cols
+        # Determine First Production Date per site
+        def get_first_date(row):
+            for col in date_cols:
+                if pd.notna(row[col]) and row[col] > 0: return col
+            return None
+        final_df['First_Production_Date'] = final_df.apply(get_first_date, axis=1)
+
+    return final_df, date_cols
 
 def generate_html(df, date_cols):
-    """Generates the Dashboard"""
-    print("Generating HTML Dashboard...")
+    """Generates the Full Dashboard with Degradation Analysis"""
+    print("Performing Math Calculations & Generating HTML...")
+
+    # 1. Load Additional Info (Simulating the Database)
+    site_name_map = {}
+    site_commissioned_map = {}
+    if os.path.exists(ADDITIONAL_INFO):
+        try:
+            db_df = pd.read_csv(ADDITIONAL_INFO)
+            if 'site_id' in db_df.columns:
+                site_name_map = dict(zip(db_df['site_id'], db_df.get('site_name', db_df['site_id'])))
+                site_commissioned_map = dict(zip(db_df['site_id'], db_df.get('commissioned_date', '')))
+        except: pass
+
+    # 2. Extract Province & Full Names
+    def get_province(site_id):
+        if isinstance(site_id, str) and len(site_id) >= 2: return PROVINCE_MAPPING.get(site_id[:2].upper(), site_id[:2])
+        return 'Unknown'
+    df['Province_Full'] = df['Site_ID'].apply(get_province)
+
+    # 3. MATH: Degradation Analysis (The complex part)
+    degradation_data = []
+    sorted_dates = sorted(date_cols) if date_cols else []
     
-    total_sites = len(df)
-    active_sites = df['Total_Production'].notna().sum()
-    
-    # Categorize
-    excellent = df[df['Avg_Yield_30d_kWh_kWp'] > 4.5]
-    good = df[(df['Avg_Yield_30d_kWh_kWp'] >= 3.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 4.5)]
-    fair = df[(df['Avg_Yield_30d_kWh_kWp'] >= 2.5) & (df['Avg_Yield_30d_kWh_kWp'] < 3.5)]
-    poor = df[df['Avg_Yield_30d_kWh_kWp'] < 2.5]
-    
-    rows = ""
-    for _, row in df.iterrows():
-        site_name = row['Site'] if pd.notna(row['Site']) else row['Site_ID']
-        yield_val = row['Avg_Yield_30d_kWh_kWp']
+    for idx, row in df.iterrows():
+        site_id = row['Site_ID']
+        array_size = row['Array_Size_kWp']
+        if pd.isna(array_size) or array_size == 0: continue
         
-        color = "#e74c3c"
-        if pd.notna(yield_val):
-            if yield_val > 4.5: color = "#2ecc71"
-            elif yield_val > 3.5: color = "#3498db"
-            elif yield_val > 2.5: color = "#f1c40f"
+        first_date = row['First_Production_Date']
+        if pd.isna(first_date): continue
+        
+        # Commissioning Month Data (First 30 days)
+        comm_start = first_date
+        comm_end = first_date + pd.Timedelta(days=30)
+        
+        # Last Month Data
+        if not sorted_dates: continue
+        latest_date = sorted_dates[-1]
+        last_month_start = latest_date - pd.Timedelta(days=30)
+        
+        # Filter Columns
+        comm_cols = [c for c in sorted_dates if comm_start <= c < comm_end]
+        last_cols = [c for c in sorted_dates if last_month_start <= c <= latest_date]
+        
+        if comm_cols and last_cols:
+            comm_vals = [row[c] for c in comm_cols if pd.notna(row[c]) and row[c] > 0]
+            last_vals = [row[c] for c in last_cols if pd.notna(row[c]) and row[c] > 0]
+            
+            if comm_vals and last_vals:
+                # 95th Percentile Calculation
+                initial_95th = np.percentile(comm_vals, 95) / array_size
+                latest_95th = np.percentile(last_vals, 95) / array_size
+                
+                years_elapsed = (latest_date - first_date).days / 365.25
+                
+                # Expected Degradation Formula
+                if years_elapsed <= 1: expected = years_elapsed * 1.5
+                else: expected = 1.5 + (years_elapsed - 1) * 0.4
+                
+                actual_deg = ((initial_95th - latest_95th) / initial_95th * 100) if initial_95th > 0 else 0
+                perf_vs_exp = expected - actual_deg
+                
+                # Check recent data (last 3 days)
+                last_3 = sorted_dates[-3:] if len(sorted_dates) >= 3 else sorted_dates
+                has_recent = any(pd.notna(row[d]) and row[d] > 0 for d in last_3)
+                
+                degradation_data.append({
+                    'site_id': site_id,
+                    'site_name': site_name_map.get(site_id, row['Site'] if pd.notna(row['Site']) else site_id),
+                    'array_size': array_size,
+                    'panel_description': str(row['Panel_Description']),
+                    'province': row['Province_Full'],
+                    'initial_yield_95th': initial_95th,
+                    'latest_yield_95th': latest_95th,
+                    'years_elapsed': years_elapsed,
+                    'expected_degradation': expected,
+                    'actual_degradation': actual_deg,
+                    'performance_vs_expected': perf_vs_exp,
+                    'has_recent_data': has_recent
+                })
+    
+    degradation_df = pd.DataFrame(degradation_data)
 
-        rows += f"""
-        <tr class="border-b hover:bg-slate-50">
-            <td class="p-3 border-l-4" style="border-left-color: {color}">
-                <div class="font-bold">{site_name}</div>
-                <div class="text-xs text-gray-500">{row['Site_ID']}</div>
-            </td>
-            <td class="p-3">{row['Array_Size_kWp']:.2f} kWp</td>
-            <td class="p-3 font-mono">{row['Avg_Daily_30d_kWh']:.1f} kWh</td>
-            <td class="p-3 font-bold" style="color:{color}">{yield_val:.2f}</td>
-        </tr>
-        """
+    # 4. Prepare Data for JavaScript
+    site_data = {}
+    date_strs = [d.strftime('%Y-%m-%d') for d in date_cols]
+    
+    for idx, row in df.iterrows():
+        site_id = row['Site_ID']
+        daily = []
+        for d in date_cols:
+            if pd.notna(row[d]):
+                daily.append({
+                    'date': d.strftime('%Y-%m-%d'),
+                    'solar_supply_kwh': float(row[d]),
+                    'specific_yield': float(row[d]) / row['Array_Size_kWp'] if row['Array_Size_kWp'] > 0 else 0
+                })
+        
+        site_data[site_id] = {
+            'site_id': site_id,
+            'site_name': site_name_map.get(site_id, str(row['Site'])),
+            'project': str(row.get('Project', 'N/A')),
+            'grid_access': str(row.get('Grid Access', 'N/A')),
+            'power_sources': str(row.get('Power Sources', 'N/A')),
+            'panel_description': str(row['Panel_Description']),
+            'array_size_kwp': float(row['Array_Size_kWp']),
+            'province': row['Province_Full'],
+            'avg_yield_30d': float(row.get('Avg_Yield_30d_kWh_kWp', 0)),
+            'daily_data': daily
+        }
 
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Solar Dashboard</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
-        <style>body {{ font-family: 'Inter', sans-serif; }}</style>
-    </head>
-    <body class="bg-slate-100 text-slate-800">
-        <div class="bg-slate-900 text-white p-6 shadow-md">
-            <div class="max-w-6xl mx-auto flex justify-between items-center">
-                <div>
-                    <h1 class="text-2xl font-bold">🌞 Solar Fleet Dashboard</h1>
-                    <p class="text-slate-400 text-sm">Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+    # 5. Calculate Aggregates
+    excellent_sites = df[df['Avg_Yield_30d_kWh_kWp'] > 4.5].to_dict('records')
+    good_sites = df[(df['Avg_Yield_30d_kWh_kWp'] >= 3.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 4.5)].to_dict('records')
+    fair_sites = df[(df['Avg_Yield_30d_kWh_kWp'] >= 2.5) & (df['Avg_Yield_30d_kWh_kWp'] < 3.5)].to_dict('records')
+    poor_sites = df[df['Avg_Yield_30d_kWh_kWp'] < 2.5].to_dict('records')
+
+    critical_alerts = [] # Sites with 0 production in last 3 days
+    last_3 = sorted_dates[-3:] if len(sorted_dates) >= 3 else sorted_dates
+    for idx, row in df.iterrows():
+        if all(pd.isna(row[d]) or row[d] == 0 for d in last_3):
+            critical_alerts.append(row['Site_ID'])
+
+    # Group Stats
+    prov_stats = df.groupby('Province_Full').agg(
+        site_count=('Site_ID', 'count'),
+        total_capacity=('Array_Size_kWp', 'sum'),
+        avg_yield=('Avg_Yield_30d_kWh_kWp', 'mean')
+    ).reset_index().sort_values('avg_yield', ascending=False)
+
+    proj_stats = df.groupby('Project').agg(
+        site_count=('Site_ID', 'count'),
+        total_capacity=('Array_Size_kWp', 'sum'),
+        avg_yield=('Avg_Yield_30d_kWh_kWp', 'mean')
+    ).reset_index().sort_values('avg_yield', ascending=False)
+
+    # 6. Generate HTML Components (Cards & Lists)
+    def gen_list_item(s, color, cat):
+        name = site_name_map.get(s['Site_ID'], s['Site'])
+        val = s['Avg_Yield_30d_kWh_kWp']
+        return f'''<div class="site-list-item" onclick="openSiteModal('{s['Site_ID']}', '{cat}')" style="cursor: pointer; padding: 0.75rem; border-left: 3px solid {color}; margin-bottom: 0.5rem; background: #f8f9fa; border-radius: 0.5rem;">
+            <div style="display: flex; justify-content: space-between;"><strong>{name}</strong><span style="color:{color}">{val:.2f} kWh/kWp</span></div>
+            <div style="font-size: 0.8em; color: gray;">{s['Panel_Description']} • {s['Array_Size_kWp']:.1f} kWp</div></div>'''
+
+    excellent_html = ''.join([gen_list_item(s, '#27ae60', 'excellent') for s in excellent_sites])
+    good_html = ''.join([gen_list_item(s, '#3498db', 'good') for s in good_sites])
+    fair_html = ''.join([gen_list_item(s, '#f39c12', 'fair') for s in fair_sites])
+    poor_html = ''.join([gen_list_item(s, '#e74c3c', 'poor') for s in poor_sites])
+
+    prov_html = ''.join([f'''<div class="stat-card" style="border-left: 4px solid #3498db; padding: 1rem; margin-bottom:0.5rem; background:white; border-radius:0.5rem;">
+        <div style="font-weight:bold;">{r['Province_Full']}</div>
+        <div style="font-size:1.5rem; font-weight:bold;">{r['avg_yield']:.2f}</div>
+        <div style="font-size:0.8rem; color:gray;">{r['site_count']} sites • {r['total_capacity']:.1f} kWp</div>
+    </div>''' for _, r in prov_stats.iterrows()])
+
+    # 7. Final HTML Injection
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solar Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {{ font-family: -apple-system, system-ui, sans-serif; background: #f0f2f5; margin: 0; padding: 0; }}
+        .header {{ background: #2c3e50; color: white; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }}
+        .nav {{ background: white; padding: 0 2rem; border-bottom: 1px solid #ddd; display: flex; gap: 2rem; }}
+        .nav-item {{ padding: 1rem 0.5rem; cursor: pointer; border-bottom: 3px solid transparent; color: #666; }}
+        .nav-item.active {{ border-bottom-color: #3498db; color: #3498db; font-weight: bold; }}
+        .container {{ padding: 2rem; max-width: 1400px; margin: 0 auto; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }}
+        .card {{ background: white; padding: 1.5rem; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+        .stat-val {{ font-size: 2rem; font-weight: bold; margin: 0.5rem 0; }}
+        .hidden {{ display: none; }}
+        .modal {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }}
+        .modal.active {{ display: flex; align-items: center; justify-content: center; }}
+        .modal-content {{ background: white; width: 90%; max-width: 1200px; height: 90%; border-radius: 1rem; padding: 2rem; overflow-y: auto; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌞 Solar Performance Dashboard</h1>
+        <div>{len(df)} Sites • {df['Array_Size_kWp'].sum():.1f} kWp</div>
+    </div>
+    <div class="nav">
+        <div class="nav-item active" onclick="showTab('overview')">Overview</div>
+        <div class="nav-item" onclick="showTab('sites')">Site Lists</div>
+        <div class="nav-item" onclick="showTab('degradation')">Degradation</div>
+        <div class="nav-item" onclick="showTab('performance')">Province Stats</div>
+    </div>
+
+    <div class="container" id="overview">
+        <div class="grid">
+            <div class="card" style="border-top: 4px solid #3498db;">
+                <div>Avg Yield (30d)</div>
+                <div class="stat-val">{df['Avg_Yield_30d_kWh_kWp'].mean():.2f}</div>
+                <div class="text-sm text-gray-500">kWh/kWp/day</div>
+            </div>
+            <div class="card" style="border-top: 4px solid #e74c3c;">
+                <div>Critical Alerts</div>
+                <div class="stat-val">{len(critical_alerts)}</div>
+                <div class="text-sm text-gray-500">Zero production (3 days)</div>
+            </div>
+            <div class="card" style="border-top: 4px solid #27ae60;">
+                <div>Excellent Sites</div>
+                <div class="stat-val">{len(excellent_sites)}</div>
+                <div class="text-sm text-gray-500">> 4.5 kWh/kWp</div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Commissioning Timeline</h3>
+            <canvas id="commChart"></canvas>
+        </div>
+    </div>
+
+    <div class="container hidden" id="sites">
+        <div class="grid">
+            <div class="card"><h3>🌟 Excellent ({len(excellent_sites)})</h3><div style="max-height:500px; overflow-y:auto">{excellent_html}</div></div>
+            <div class="card"><h3>✅ Good ({len(good_sites)})</h3><div style="max-height:500px; overflow-y:auto">{good_html}</div></div>
+            <div class="card"><h3>⚠️ Fair ({len(fair_sites)})</h3><div style="max-height:500px; overflow-y:auto">{fair_html}</div></div>
+            <div class="card"><h3>🚨 Poor ({len(poor_sites)})</h3><div style="max-height:500px; overflow-y:auto">{poor_html}</div></div>
+        </div>
+    </div>
+
+    <div class="container hidden" id="degradation">
+        <div class="card">
+            <h3>Degradation Analysis (95th Percentile Method)</h3>
+            <p>Comparing first 30 days vs last 30 days of production.</p>
+            <div id="deg-list" style="margin-top:1rem;"></div>
+        </div>
+    </div>
+
+    <div class="container hidden" id="performance">
+        <div class="grid">
+            <div class="card"><h3>Province Performance</h3>{prov_html}</div>
+        </div>
+    </div>
+
+    <div id="site-modal" class="modal">
+        <div class="modal-content">
+            <div style="display:flex; justify-content:space-between;">
+                <h2 id="modal-title">Site Name</h2>
+                <button onclick="document.getElementById('site-modal').classList.remove('active')" style="padding:0.5rem 1rem; cursor:pointer;">Close</button>
+            </div>
+            <div id="modal-info" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; margin:1rem 0; background:#f8f9fa; padding:1rem; border-radius:0.5rem;"></div>
+            <canvas id="siteChart" style="max-height:400px;"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const siteData = {json.dumps(site_data)};
+        const degData = {json.dumps(degradation_df.to_dict('records') if not degradation_df.empty else [])};
+
+        function showTab(id) {{
+            document.querySelectorAll('.container').forEach(d => d.classList.add('hidden'));
+            document.getElementById(id).classList.remove('hidden');
+            document.querySelectorAll('.nav-item').forEach(d => d.classList.remove('active'));
+            event.target.classList.add('active');
+        }}
+
+        // Degradation List Logic
+        const degList = document.getElementById('deg-list');
+        degData.sort((a,b) => b.actual_degradation - a.actual_degradation);
+        let degHtml = '';
+        degData.forEach(s => {{
+            let color = s.actual_degradation > 50 ? '#e74c3c' : (s.actual_degradation > 30 ? '#f39c12' : '#27ae60');
+            degHtml += `<div style="padding:1rem; border-left:4px solid ${{color}}; background:#f8f9fa; margin-bottom:0.5rem; border-radius:4px;">
+                <div style="font-weight:bold; display:flex; justify-content:space-between;">
+                    ${{s.site_name}}
+                    <span style="color:${{color}}">${{s.actual_degradation.toFixed(1)}}% Degraded</span>
                 </div>
-                <div class="text-right">
-                    <div class="text-3xl font-bold text-green-400">{active_sites} / {total_sites}</div>
-                    <div class="text-xs uppercase tracking-wider text-slate-500">Active Sites</div>
-                </div>
-            </div>
-        </div>
+                <div style="font-size:0.9em; color:#666;">Expected: ${{s.expected_degradation.toFixed(1)}}% • Age: ${{s.years_elapsed.toFixed(1)}} years</div>
+            </div>`;
+        }});
+        degList.innerHTML = degHtml || 'No sufficient data for degradation analysis.';
 
-        <div class="max-w-6xl mx-auto mt-8 grid grid-cols-1 md:grid-cols-4 gap-4 px-4">
-            <div class="bg-white p-4 rounded shadow border-l-4 border-green-500">
-                <div class="text-gray-500 text-xs uppercase">Excellent (>4.5)</div>
-                <div class="text-2xl font-bold">{len(excellent)} Sites</div>
-            </div>
-            <div class="bg-white p-4 rounded shadow border-l-4 border-blue-500">
-                <div class="text-gray-500 text-xs uppercase">Good (3.5-4.5)</div>
-                <div class="text-2xl font-bold">{len(good)} Sites</div>
-            </div>
-            <div class="bg-white p-4 rounded shadow border-l-4 border-yellow-400">
-                <div class="text-gray-500 text-xs uppercase">Fair (2.5-3.5)</div>
-                <div class="text-2xl font-bold">{len(fair)} Sites</div>
-            </div>
-            <div class="bg-white p-4 rounded shadow border-l-4 border-red-500">
-                <div class="text-gray-500 text-xs uppercase">Poor (<2.5)</div>
-                <div class="text-2xl font-bold">{len(poor)} Sites</div>
-            </div>
-        </div>
+        // Modal Logic
+        let chartInstance = null;
+        window.openSiteModal = function(id) {{
+            const s = siteData[id];
+            if(!s) return;
+            document.getElementById('site-modal').classList.add('active');
+            document.getElementById('modal-title').innerText = s.site_name;
+            
+            document.getElementById('modal-info').innerHTML = `
+                <div><strong>Province:</strong> ${{s.province}}</div>
+                <div><strong>Capacity:</strong> ${{s.array_size_kwp}} kWp</div>
+                <div><strong>Panels:</strong> ${{s.panel_description}}</div>
+                <div><strong>Project:</strong> ${{s.project}}</div>
+            `;
 
-        <div class="max-w-6xl mx-auto mt-8 px-4 pb-12">
-            <div class="bg-white rounded shadow overflow-hidden">
-                <table class="w-full text-sm text-left">
-                    <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
-                        <tr>
-                            <th class="p-3">Site</th>
-                            <th class="p-3">Capacity</th>
-                            <th class="p-3">30-Day Daily Avg</th>
-                            <th class="p-3">Specific Yield</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+            const ctx = document.getElementById('siteChart').getContext('2d');
+            if(chartInstance) chartInstance.destroy();
+            
+            chartInstance = new Chart(ctx, {{
+                type: 'line',
+                data: {{
+                    labels: s.daily_data.map(d => d.date),
+                    datasets: [{{
+                        label: 'Specific Yield (kWh/kWp)',
+                        data: s.daily_data.map(d => d.specific_yield),
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        fill: true
+                    }}]
+                }},
+                options: {{ responsive: true, scales: {{ y: {{ beginAtZero: true }} }} }}
+            }});
+        }};
+    </script>
+</body>
+</html>"""
     
     with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
-        f.write(html)
+        f.write(html_content)
     print(f"Dashboard generated: {OUTPUT_HTML}")
 
 def main():
@@ -310,7 +485,7 @@ def main():
         final_df, date_cols = process_data(pivot_df)
         generate_html(final_df, date_cols)
     else:
-        print("No data found to process.")
+        print("No data found.")
 
 if __name__ == "__main__":
     main()
