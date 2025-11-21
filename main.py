@@ -162,6 +162,10 @@ def generate_html(df, date_cols):
     """Generates the Full Dashboard using Logic from Your Original Script"""
     print("Performing Advanced Analysis & Generating HTML...")
 
+    # --- FIX: Calculate active sites BEFORE using it ---
+    active_sites = df['Total_Production'].notna().sum()
+    # -------------------------------------------------
+
     # Load Additional Info
     site_name_map = {}
     site_commissioned_map = {}
