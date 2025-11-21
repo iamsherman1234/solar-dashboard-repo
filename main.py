@@ -9,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 # --- CONFIGURATION ---
-DRIVE_FOLDER_ID = '1jhw0IRHwG8ogRCL9g9Qu3RAsN0gkNLPI' 
+DRIVE_FOLDER_ID = '1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm' 
 
 # Paths
 METADATA_FILE = os.path.join(os.path.dirname(__file__), '../data/sites_metadata.xlsx')
