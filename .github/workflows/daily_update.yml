@@ -30,41 +30,41 @@ jobs:
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
         run: python -u main.py
 
-      # --- PREPARE RELEASE FILES ---
-      - name: Prepare Release Archives
+      # --- PREPARE SINGLE FILE RELEASE ---
+      - name: Prepare Release
         run: |
           DATE_STR=$(date +'%d%m%Y')
-          ZIP_NAME="Solar_Report_${DATE_STR}.zip"
           
-          # 1. Copy files to dated versions (for internal ref if needed, but we zip generics)
-          # Actually, we just zip the generic files directly into a dated zip.
-          # This ensures the HTML inside looks for "dashboard_data.json" (generic) which exists inside the zip.
+          # Rename HTML File
+          cp index.html "${DATE_STR}_solar_dashboard.html"
           
-          zip -r $ZIP_NAME index.html dashboard_data.json
+          # Zip it (Optional but recommended for 50MB+ files)
+          zip "Solar_Report_${DATE_STR}.zip" "${DATE_STR}_solar_dashboard.html"
           
-          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "REPORT_NAME=${DATE_STR}_solar_dashboard.html" >> $GITHUB_ENV
+          echo "ZIP_NAME=Solar_Report_${DATE_STR}.zip" >> $GITHUB_ENV
           echo "TAG_NAME=report-${DATE_STR}" >> $GITHUB_ENV
 
-      # --- CREATE RELEASE (ZIP ONLY) ---
+      # --- CREATE RELEASE ---
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG_NAME }}
-          name: "Solar Report: ${{ env.ZIP_NAME }}"
+          name: "Solar Dashboard: ${{ env.REPORT_NAME }}"
           files: ${{ env.ZIP_NAME }}
-          body: "Download the ZIP file to view the full interactive dashboard offline."
+          body: "Single-file offline dashboard (Data Embedded)."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- DEPLOY WEBSITE (Live View) ---
+      # --- DEPLOY WEBSITE ---
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./
-          # EXCLUDE: Zip files, dated HTML/JSON copies, source code, config files
-          # INCLUDE: Generic index.html and dashboard_data.json (implicitly included by NOT being in this list)
-          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,temp_master.parquet,requirements.txt,*.zip'
+          # Exclude all temp files, source code, and the dated backups
+          # Only index.html goes to the website
+          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,temp_master.parquet,requirements.txt,*.zip,21*_*.html'
           destination_dir: ./
           keep_files: true
           user_name: 'SolarBot'
