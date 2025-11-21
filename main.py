@@ -40,8 +40,9 @@ def get_drive_service():
 def download_monitoring_data(service):
     print(f"Connecting to Drive Folder: {DRIVE_FOLDER_ID}...")
     try:
+        # Removed mimeType filter to allow .parquet files
         results = service.files().list(
-            q=f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
+            q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
             fields="files(id, name)"
         ).execute()
     except Exception as e:
@@ -50,9 +51,15 @@ def download_monitoring_data(service):
     
     files = results.get('files', [])
     all_data = []
-    print(f"Found {len(files)} monitoring files. Downloading & Processing...")
+    print(f"Found {len(files)} files. Downloading & Processing...")
     
     for file in files:
+        file_name = file['name'].lower()
+        
+        # Skip non-data files
+        if not (file_name.endswith('.xlsx') or file_name.endswith('.parquet')):
+            continue
+
         try:
             # Download file to memory
             request = service.files().get_media(fileId=file['id'])
@@ -61,28 +68,42 @@ def download_monitoring_data(service):
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
+            fh.seek(0)
             
-            # --- ROBUST HEADER DETECTION PATCH ---
-            header_row_index = 0
-            fh.seek(0)
-            try:
-                # Scan first 50 rows
-                df_test = pd.read_excel(fh, header=None, nrows=50, engine='openpyxl')
-                found_header = False
-                for i, row in df_test.iterrows():
-                    row_values = [str(val).strip() for val in row.values]
-                    if 'Site' in row_values and 'Solar Supply (kWh)' in row_values:
-                        header_row_index = i
-                        found_header = True
-                        break
-                if not found_header:
-                    print(f"    ⚠ Skipped {file['name']} (Header not found)")
-                    continue
-            except: continue
+            df = pd.DataFrame()
 
-            # Read Actual Data
-            fh.seek(0)
-            df = pd.read_excel(fh, header=header_row_index, engine='openpyxl')
+            # --- OPTION A: PARQUET (Fast & Clean) ---
+            if file_name.endswith('.parquet'):
+                try:
+                    df = pd.read_parquet(fh)
+                except Exception as pq_err:
+                    print(f"    ⚠ Error reading parquet {file['name']}: {pq_err}")
+                    continue
+
+            # --- OPTION B: EXCEL (With Header Detection) ---
+            elif file_name.endswith('.xlsx'):
+                header_row_index = 0
+                try:
+                    # Scan first 50 rows
+                    df_test = pd.read_excel(fh, header=None, nrows=50, engine='openpyxl')
+                    found_header = False
+                    for i, row in df_test.iterrows():
+                        row_values = [str(val).strip() for val in row.values]
+                        if 'Site' in row_values and 'Solar Supply (kWh)' in row_values:
+                            header_row_index = i
+                            found_header = True
+                            break
+                    if not found_header:
+                        print(f"    ⚠ Skipped {file['name']} (Header not found)")
+                        continue
+                except: continue
+
+                # Read Actual Data
+                fh.seek(0)
+                df = pd.read_excel(fh, header=header_row_index, engine='openpyxl')
+
+            # --- COMMON CLEANUP ---
+            # Clean columns
             df.columns = [str(col).replace('\ufeff', '').strip() for col in df.columns]
             
             if 'Site' in df.columns and 'Date' in df.columns and 'Solar Supply (kWh)' in df.columns:
@@ -94,6 +115,7 @@ def download_monitoring_data(service):
                 temp_df['Site_ID'] = temp_df['Site_ID'].astype(str).str.strip()
                 temp_df = temp_df.dropna(subset=['Date'])
                 all_data.append(temp_df)
+                
         except Exception as e:
             print(f"Skipping {file['name']}: {e}")
 
@@ -164,7 +186,6 @@ def generate_html(df, date_cols):
 
     # --- FIX: Calculate active sites BEFORE using it ---
     active_sites = df['Total_Production'].notna().sum()
-    # -------------------------------------------------
 
     # Load Additional Info
     site_name_map = {}
@@ -241,18 +262,13 @@ def generate_html(df, date_cols):
     degradation_df = pd.DataFrame(degradation_data)
 
     # --- AGGREGATIONS FOR CHARTS ---
-    # 1. Grid Access
     grid_access_stats = df.groupby('Grid Access').agg(site_count=('Site_ID', 'count')).reset_index()
-    
-    # 2. Power Sources
     power_sources_stats = df.groupby('Power Sources').agg(site_count=('Site_ID', 'count')).reset_index()
     
-    # 3. Commissioning Timeline
     comm_timeline = df[df['First_Production_Date'].notna()].copy()
     comm_timeline = comm_timeline.sort_values('First_Production_Date')
     comm_counts = comm_timeline.groupby('First_Production_Date').size().reset_index(name='count')
     comm_counts['cumulative_count'] = comm_counts['count'].cumsum()
-    # Convert dates to string for JSON
     comm_counts['date_str'] = comm_counts['First_Production_Date'].dt.strftime('%Y-%m-%d')
     commissioning_data = comm_counts[['date_str', 'cumulative_count', 'count']].to_dict('records')
 
@@ -317,7 +333,6 @@ def generate_html(df, date_cols):
     ).reset_index().sort_values('avg_yield', ascending=False)
 
     # --- HTML GENERATION ---
-    # Helper Functions for HTML injection
     def gen_list(s, color, cat):
         name = site_name_map.get(s['Site_ID'], s['Site'])
         return f'''<div class="site-list-item" onclick="openSiteModal('{s['Site_ID']}', '{cat}')" style="cursor:pointer; padding:0.75rem; border-left:3px solid {color}; margin-bottom:0.5rem; background:#f8f9fa; border-radius:0.5rem;">
@@ -329,7 +344,6 @@ def generate_html(df, date_cols):
     fair_html = ''.join([gen_list(s, '#f39c12', 'fair') for s in fair])
     poor_html = ''.join([gen_list(s, '#e74c3c', 'poor') for s in poor])
 
-    # Card Helpers
     def gen_stat_card(label, val, sub, color_code):
         color = {'green':'#27ae60', 'blue':'#3498db', 'yellow':'#f39c12', 'red':'#e74c3c'}.get(color_code, '#333')
         return f'''<div class="stat-card" style="border-left: 4px solid {color}; padding: 1rem; margin-bottom:0.5rem; background:white; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
@@ -370,7 +384,6 @@ def generate_html(df, date_cols):
         .period-button {{ flex: 1; padding: 0.5rem; border: none; background: white; border-radius: 0.375rem; cursor: pointer; }}
         .period-button.active {{ background: #3498db; color: white; }}
         
-        /* Flex Grid for Charts */
         .chart-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1rem; }}
         @media (max-width: 768px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
     </style>
@@ -475,7 +488,6 @@ def generate_html(df, date_cols):
     </div>
 
     <script>
-        // Data Injection
         const siteData = {json.dumps(site_data)};
         const degData = {json.dumps(degradation_df.to_dict('records') if not degradation_df.empty else [])};
         const gridData = {json.dumps(grid_access_stats.to_dict('records'))};
@@ -492,7 +504,6 @@ def generate_html(df, date_cols):
             event.target.classList.add('active');
         }}
 
-        // --- OVERVIEW CHARTS ---
         new Chart(document.getElementById('gridChart'), {{
             type: 'pie',
             data: {{
@@ -526,7 +537,6 @@ def generate_html(df, date_cols):
             options: {{ maintainAspectRatio: false, scales: {{ y: {{ beginAtZero: true }} }} }}
         }});
 
-        // --- DEGRADATION LIST ---
         const degList = document.getElementById('deg-list');
         degData.sort((a,b) => b.actual_degradation - a.actual_degradation);
         let degHtml = '';
@@ -545,7 +555,6 @@ def generate_html(df, date_cols):
         }});
         degList.innerHTML = degHtml || 'Insufficient data for degradation analysis.';
 
-        // --- MODAL LOGIC ---
         window.openSiteModal = function(id) {{
             currentSiteId = id;
             const s = siteData[id];
@@ -553,7 +562,6 @@ def generate_html(df, date_cols):
             document.getElementById('site-modal').classList.add('active');
             document.getElementById('modal-title').innerText = s.site_name;
             
-            // Populate Info
             document.getElementById('modal-info').innerHTML = `
                 <div><div style="font-size:0.8em; color:gray;">Province</div><strong>${{s.province}}</strong></div>
                 <div><div style="font-size:0.8em; color:gray;">Capacity</div><strong>${{s.array_size_kwp}} kWp</strong></div>
@@ -563,7 +571,6 @@ def generate_html(df, date_cols):
                 <div><div style="font-size:0.8em; color:gray;">Project</div><strong>${{s.project}}</strong></div>
             `;
             
-            // Trigger 90d view by default
             loadSiteData(document.querySelectorAll('.period-button')[2], '90d');
         }};
 
@@ -574,7 +581,6 @@ def generate_html(df, date_cols):
             const s = siteData[currentSiteId];
             if(!s) return;
             
-            // Filter Data
             const days = {{'7d':7, '30d':30, '90d':90}};
             let filtered = s.daily_data;
             if(period !== 'all') {{
@@ -583,11 +589,9 @@ def generate_html(df, date_cols):
                 filtered = s.daily_data.filter(d => new Date(d.date) >= cutoff);
             }}
 
-            // Destroy old charts
             siteCharts.forEach(c => c.destroy());
             siteCharts = [];
             
-            // Create New Charts
             const ctx1 = document.getElementById('dailyChart').getContext('2d');
             siteCharts.push(new Chart(ctx1, {{
                 type: 'bar',
