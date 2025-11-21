@@ -2,7 +2,8 @@ name: Update Dashboard
 
 on:
   schedule:
-    - cron: '0 23 * * *' # Runs at 6:00 AM Cambodia Time
+    # Runs at 7:00 AM Cambodia Time (00:00 UTC)
+    - cron: '0 0 * * *'
   workflow_dispatch:     # Allows manual button click
 
 permissions:
@@ -19,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.11' # Using 3.11 removes warnings
 
       - name: Install packages
         run: pip install -r requirements.txt
@@ -27,7 +28,18 @@ jobs:
       - name: Run script
         env:
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        # -u forces unbuffered output so you see logs in real-time
         run: python -u main.py
+
+      # --- NEW STEP: UPLOAD FILE FOR DOWNLOAD ---
+      # This saves the HTML file as a downloadable artifact
+      - name: Upload HTML Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: solar-dashboard-file
+          path: index.html
+          retention-days: 5 # Keeps the download available for 5 days
+      # ----------------------------------------
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
