@@ -27,7 +27,7 @@ jobs:
       - name: Run script
         env:
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
-        run: python main.py
+        run: python -u main.py
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
