@@ -2,8 +2,8 @@ name: Update Dashboard
 
 on:
   schedule:
-    # Runs at 7:00 AM Cambodia Time (00:00 UTC)
-    - cron: '0 0 * * *'
+    # Runs at 7:00 AM Cambodia Time (00:00 UTC) on MONDAYS only
+    - cron: '0 0 * * 1' 
   workflow_dispatch:     # Allows manual button click
 
 permissions:
@@ -20,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # Using 3.11 removes warnings
+          python-version: '3.11'
 
       - name: Install packages
         run: pip install -r requirements.txt
@@ -28,18 +28,42 @@ jobs:
       - name: Run script
         env:
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
-        # -u forces unbuffered output so you see logs in real-time
         run: python -u main.py
 
-      # --- NEW STEP: UPLOAD FILE FOR DOWNLOAD ---
-      # This saves the HTML file as a downloadable artifact
+      # --- NEW STEP 1: RENAME FILE WITH DATE ---
+      - name: Rename HTML with Date
+        run: |
+          # Get current date in DDMMYYYY format (e.g., 21112025)
+          DATE_STR=$(date +'%d%m%Y')
+          # Rename index.html to DDMMYYYY_solar_dashboard.html
+          mv index.html "${DATE_STR}_solar_dashboard.html"
+          # Save the filename to an environment variable for the next steps
+          echo "REPORT_NAME=${DATE_STR}_solar_dashboard.html" >> $GITHUB_ENV
+          echo "TAG_NAME=report-${DATE_STR}" >> $GITHUB_ENV
+
+      # --- NEW STEP 2: UPLOAD ARTIFACT (Keep this for easy download) ---
       - name: Upload HTML Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: solar-dashboard-file
-          path: index.html
-          retention-days: 5 # Keeps the download available for 5 days
-      # ----------------------------------------
+          name: daily-report
+          path: ${{ env.REPORT_NAME }}
+          retention-days: 30
+
+      # --- NEW STEP 3: CREATE RELEASE ---
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: "Solar Dashboard: ${{ env.REPORT_NAME }}"
+          files: ${{ env.REPORT_NAME }}
+          body: "Automated weekly solar performance report."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- STEP 4: DEPLOY TO PAGES (Must rename back to index.html first) ---
+      # GitHub Pages requires 'index.html' to be the main page
+      - name: Prepare for Pages
+        run: cp "${{ env.REPORT_NAME }}" index.html
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
