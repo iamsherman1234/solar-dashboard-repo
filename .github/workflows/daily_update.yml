@@ -1,0 +1,40 @@
+name: Update Dashboard
+
+on:
+  schedule:
+    - cron: '0 23 * * *' # Runs at 6:00 AM Cambodia Time
+  workflow_dispatch:     # Allows manual button click
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout content
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install packages
+        run: pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        run: python main.py
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+          destination_dir: ./
+          keep_files: true
+          user_name: 'SolarBot'
+          user_email: 'bot@solar.com'
