@@ -2,9 +2,10 @@ name: Update Dashboard
 
 on:
   schedule:
-    # Runs at 7:00 AM Cambodia Time (00:00 UTC) on MONDAYS only
-    - cron: '0 0 * * 1' 
-  workflow_dispatch:     # Allows manual button click
+    # 00:00 UTC = 07:00 Cambodia Time (UTC+7)
+    # Day 1 = Monday
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,52 +21,26 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: Install packages
         run: pip install -r requirements.txt
 
       - name: Run script
         env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
-        run: python -u main.py
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+        run: python solar_automation.py
 
-      # --- PREPARE SINGLE FILE RELEASE ---
-      - name: Prepare Release
-        run: |
-          DATE_STR=$(date +'%d%m%Y')
-          
-          # Rename HTML File
-          cp index.html "${DATE_STR}_solar_dashboard.html"
-          
-          # Zip it (Optional but recommended for 50MB+ files)
-          zip "Solar_Report_${DATE_STR}.zip" "${DATE_STR}_solar_dashboard.html"
-          
-          echo "REPORT_NAME=${DATE_STR}_solar_dashboard.html" >> $GITHUB_ENV
-          echo "ZIP_NAME=Solar_Report_${DATE_STR}.zip" >> $GITHUB_ENV
-          echo "TAG_NAME=report-${DATE_STR}" >> $GITHUB_ENV
-
-      # --- CREATE RELEASE ---
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: "Solar Dashboard: ${{ env.REPORT_NAME }}"
-          files: ${{ env.ZIP_NAME }}
-          body: "Single-file offline dashboard (Data Embedded)."
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- DEPLOY WEBSITE ---
+      # --- DEPLOY TO GITHUB PAGES ---
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./
-          # Exclude all temp files, source code, and the dated backups
-          # Only index.html goes to the website
-          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,temp_master.parquet,requirements.txt,*.zip,21*_*.html'
           destination_dir: ./
-          keep_files: true
+          keep_files: false
+          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,*.parquet,requirements.txt'
           user_name: 'SolarBot'
           user_email: 'bot@solar.com'
