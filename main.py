@@ -1,27 +1,20 @@
 import os
 import json
+import shutil
 import pandas as pd
 import numpy as np
-import io
+import sqlite3
 from datetime import datetime, timedelta
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from oauth2client.client import GoogleCredentials
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
 
-# --- CONFIGURATION ---
-MONITORING_FOLDER_ID = '1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm' 
-ARCHIVE_FOLDER_ID    = '19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G' 
+# --- CONFIGURATION (UPDATE THESE!) ---
+FOLDER_ID_DASHBOARD = "14hr8Jwhfi0deKHjWE3aUpqKo2OpGk-MC"  
+FOLDER_ID_MONITORING = "1L3AmxhEdXc_W6J9zrMtRPv6a0VpsjyXo" 
+FOLDER_ID_ARCHIVE = "1_L1QSEdxm_skS7vgLWGaD1WRYjpxOsbI" 
 
-# FILE NAMES
-MASTER_FILENAME = 'all_monitoring_data.parquet'
-
-# PATHS
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-METADATA_FILE = os.path.join(BASE_DIR, 'data/sites_metadata.xlsx')
-ADDITIONAL_INFO = os.path.join(BASE_DIR, 'data/additional_site_info.csv')
-OUTPUT_HTML = 'index.html'
-OUTPUT_JSON = 'dashboard_data.json' # New separate data file
-
+# --- HELPER FUNCTIONS (YOURS) ---
 PROVINCE_MAPPING = {
     'SV': 'Sihanoukville', 'KK': 'Koh Kong', 'SI': 'Siem Reap', 'PV': 'Prey Veng',
     'SR': 'Svay Rieng', 'KD': 'Kandal', 'KS': 'Kampong Speu', 'KC': 'Kampong Cham',
@@ -31,197 +24,253 @@ PROVINCE_MAPPING = {
     'ST': 'Stung Treng', 'MK': 'Mondulkiri', 'RK': 'Ratanakiri', 'PP': 'Phnom Penh', 'TK': 'Takeo'
 }
 
-def get_drive_service():
-    creds_json = os.environ.get('GDRIVE_CREDENTIALS')
-    if not creds_json:
-        raise ValueError("GDRIVE_CREDENTIALS secret not found!")
-    creds_dict = json.loads(creds_json)
-    creds = Credentials.from_service_account_info(
-        creds_dict, scopes=['https://www.googleapis.com/auth/drive']
+def get_province_full_name(abbreviation):
+    return PROVINCE_MAPPING.get(abbreviation.upper(), abbreviation)
+
+def extract_province_from_site_id(site_id):
+    if isinstance(site_id, str) and len(site_id) >= 2:
+        return site_id[:2].upper()
+    return 'Unknown'
+   
+def safe_val(val, func=float, default=0):
+    try:
+        return func(val) if pd.notna(val) else default
+    except:
+        return default
+   
+# --- AUTHENTICATION ---
+def authenticate_drive():
+    print("Authenticating with Google Drive (OAuth2)...")
+    client_id = os.environ.get("GDRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+    
+    if not client_id or not client_secret or not refresh_token:
+        raise Exception("Missing OAuth2 Secrets in GitHub!")
+
+    gauth = GoogleAuth()
+    gauth.credentials = GoogleCredentials(
+        access_token=None,
+        client_id=client_id,
+        client_secret=client_secret,
+        refresh_token=refresh_token,
+        token_expiry=None,
+        token_uri="https://oauth2.googleapis.com/token",
+        user_agent=None
     )
-    return build('drive', 'v3', credentials=creds)
+    return GoogleDrive(gauth)
 
-def sync_and_load_data(service):
-    # ... (This function remains EXACTLY the same as before) ...
-    # For brevity, I'm not repeating the full sync logic here, 
-    # but in your actual file, keep the full content of sync_and_load_data
-    print("Scanning Drive folders...", flush=True)
-    results = service.files().list(
-        q=f"'{MONITORING_FOLDER_ID}' in parents and trashed=false",
-        fields="files(id, name)"
-    ).execute()
-    files = results.get('files', [])
+# --- PART 1: DATA PROCESSOR (Creates the Excel File) ---
+def run_processor(drive):
+    print("\n" + "="*30)
+    print("STARTING DATA PROCESSOR")
+    print("="*30)
     
-    master_file_id = None
-    new_excel_files = []
+    # 1. Download Metadata
+    print("Downloading Metadata...")
+    meta_files = drive.ListFile({'q': f"'{FOLDER_ID_DASHBOARD}' in parents and title = 'Solar Installation info.xlsx' and trashed=false"}).GetList()
+    if not meta_files:
+        print("❌ Critical Error: Metadata file 'Solar Installation info.xlsx' not found.")
+        return None
+    meta_files[0].GetContentFile("metadata.xlsx")
     
-    for f in files:
-        if f['name'] == MASTER_FILENAME:
-            master_file_id = f['id']
-        elif f['name'].endswith('.xlsx'):
-            new_excel_files.append(f)
-
-    master_df = pd.DataFrame()
-    if master_file_id:
-        print(f"Found Master Data ({MASTER_FILENAME}). Downloading...", flush=True)
-        try:
-            request = service.files().get_media(fileId=master_file_id)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while done is False:
-                status, done = downloader.next_chunk()
-            fh.seek(0)
-            master_df = pd.read_parquet(fh)
-            print(f"Loaded {len(master_df)} historical records.", flush=True)
-        except Exception as e:
-            print(f"⚠ Error loading master parquet: {e}", flush=True)
-
-    new_data = []
-    processed_files = []
-    
-    if new_excel_files:
-        print(f"Found {len(new_excel_files)} new Excel files...", flush=True)
-        for file in new_excel_files:
-            print(f"Processing {file['name']}...", flush=True)
-            try:
-                request = service.files().get_media(fileId=file['id'])
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, request)
-                done = False
-                while done is False:
-                    status, done = downloader.next_chunk()
-                
-                header_row_index = 0
-                fh.seek(0)
-                try:
-                    df_test = pd.read_excel(fh, header=None, nrows=50, engine='openpyxl')
-                    found_header = False
-                    for i, row in df_test.iterrows():
-                        row_values = [str(val).strip() for val in row.values]
-                        if 'Site' in row_values and 'Solar Supply (kWh)' in row_values:
-                            header_row_index = i
-                            found_header = True
-                            break
-                    if not found_header:
-                        print(f"  ⚠ Skipped {file['name']} (Header not found)", flush=True)
-                        continue
-                except: continue
-
-                fh.seek(0)
-                df = pd.read_excel(fh, header=header_row_index, engine='openpyxl')
-                df.columns = [str(col).replace('\ufeff', '').strip() for col in df.columns]
-                
-                if 'Site' in df.columns and 'Date' in df.columns and 'Solar Supply (kWh)' in df.columns:
-                    site_col = 'Site ID' if 'Site ID' in df.columns else 'Site'
-                    temp_df = df[[site_col, 'Date', 'Solar Supply (kWh)']].copy()
-                    temp_df.columns = ['Site_ID', 'Date', 'Solar_kWh']
-                    temp_df['Date'] = pd.to_datetime(temp_df['Date'], errors='coerce')
-                    temp_df['Solar_kWh'] = pd.to_numeric(temp_df['Solar_kWh'], errors='coerce')
-                    temp_df['Site_ID'] = temp_df['Site_ID'].astype(str).str.strip()
-                    temp_df = temp_df.dropna(subset=['Date'])
-                    
-                    new_data.append(temp_df)
-                    processed_files.append(file)
-                else:
-                    print(f"  ⚠ Missing columns in {file['name']}", flush=True)
-            except Exception as e:
-                print(f"  ⚠ Error reading {file['name']}: {e}", flush=True)
-
-    if not new_data and master_df.empty:
-        return pd.DataFrame()
-    
-    combined_df = master_df
-    if new_data:
-        print("Merging new data...", flush=True)
-        new_df = pd.concat(new_data, ignore_index=True)
-        combined_df = pd.concat([master_df, new_df], ignore_index=True)
-    
-    if not combined_df.empty:
-        combined_df = combined_df.sort_values('Date').drop_duplicates(subset=['Site_ID', 'Date'], keep='last')
-
-    if new_data:
-        print("Uploading updated Master Parquet...", flush=True)
-        combined_df.to_parquet('temp_master.parquet', index=False)
-        
-        file_metadata = {'name': MASTER_FILENAME}
-        media = MediaIoBaseUpload(io.BytesIO(open('temp_master.parquet', 'rb').read()), mimetype='application/octet-stream', resumable=True)
-        
-        if master_file_id:
-            service.files().update(fileId=master_file_id, media_body=media).execute()
-        else:
-            file_metadata['parents'] = [MONITORING_FOLDER_ID]
-            service.files().create(body=file_metadata, media_body=media).execute()
-        
-        print("✅ Master Updated.", flush=True)
-
-        if ARCHIVE_FOLDER_ID and ARCHIVE_FOLDER_ID != 'PASTE_YOUR_ARCHIVE_FOLDER_ID_HERE':
-            print(f"Archiving {len(processed_files)} files...", flush=True)
-            for file in processed_files:
-                try:
-                    service.files().update(fileId=file['id'], addParents=ARCHIVE_FOLDER_ID, removeParents=MONITORING_FOLDER_ID).execute()
-                except: pass
-
-    print("Pivoting data...", flush=True)
-    if combined_df.empty: return pd.DataFrame()
-    pivot_df = combined_df.pivot(index='Site_ID', columns='Date', values='Solar_kWh').reset_index()
-    return pivot_df
-
-def process_data(pivot_df):
-    # ... (Keep existing process_data function exactly the same) ...
-    print("Processing Stats...", flush=True)
-    if not os.path.exists(METADATA_FILE): return pd.DataFrame(), []
-
-    meta_df = pd.read_excel(METADATA_FILE)
-    if 'Split' in meta_df.columns:
-        meta_df['Site_ID'] = meta_df['Split'].astype(str).str.strip()
+    # 2. Download History
+    print("Downloading History...")
+    hist_files = drive.ListFile({'q': f"'{FOLDER_ID_DASHBOARD}' in parents and title = 'all_monitoring_data_long.parquet' and trashed=false"}).GetList()
+    if hist_files:
+        hist_files[0].GetContentFile("history.parquet")
+        history_df = pd.read_parquet("history.parquet")
+        print(f"  ✓ Loaded {len(history_df):,} historical records.")
     else:
-        meta_df['Site_ID'] = meta_df['Site'].astype(str).str.strip()
-
-    def calculate_array_size(row):
-        try: return (float(row['Panels']) * float(row['Panel Size'])) / 1000
-        except: return 0
-    meta_df['Array_Size_kWp'] = meta_df.apply(calculate_array_size, axis=1)
-
-    def create_desc(row):
-        try: return f"{row['Panel Size']}W {row['Panel Vendor']} {row['Panel Model']}"
-        except: return "Unknown"
-    meta_df['Panel_Description'] = meta_df.apply(create_desc, axis=1)
-
-    final_df = meta_df.merge(pivot_df, on='Site_ID', how='left')
-
-    date_cols = [c for c in final_df.columns if isinstance(c, pd.Timestamp)]
-    if date_cols:
-        latest_date = max(date_cols)
-        cols_30d = [c for c in date_cols if c >= latest_date - pd.Timedelta(days=30)]
+        print("  ⚠ No history file found. Starting fresh.")
+        history_df = pd.DataFrame()
         
-        final_df['Prod_30d_kWh'] = final_df[cols_30d].sum(axis=1)
-        final_df['Avg_Yield_30d_kWh_kWp'] = (final_df[cols_30d].mean(axis=1) / final_df['Array_Size_kWp']).fillna(0)
-        final_df['Total_Production'] = final_df[date_cols].sum(axis=1)
+    # 3. Download NEW Monitoring Files
+    print("Checking for new files...")
+    new_files = drive.ListFile({'q': f"'{FOLDER_ID_MONITORING}' in parents and trashed=false"}).GetList()
+    data_files = [f for f in new_files if f['title'].endswith(('.xlsx', '.csv'))]
+    
+    if not data_files:
+        print("  ✓ No new files found.")
+        return None 
 
+    new_dfs = []
+    processed_files = []
+
+    for f in data_files:
+        print(f"  Processing: {f['title']}...")
+        f.GetContentFile(f['title'])
+        try:
+            df = None
+            if f['title'].endswith('.xlsx'):
+                df_temp = pd.read_excel(f['title'], header=None, nrows=20)
+                header_row = 0
+                for i, row in df_temp.iterrows():
+                    if str(row.iloc[0]).strip() == 'Site': header_row = i; break
+                df = pd.read_excel(f['title'], skiprows=header_row)
+            elif f['title'].endswith('.csv'):
+                df = pd.read_csv(f['title'], sep='\t', encoding='utf-16', on_bad_lines='skip')
+            
+            if df is not None:
+                df.columns = [str(c).replace('\ufeff', '').strip() for c in df.columns]
+                if 'Site' in df.columns:
+                    renames = {'Site ID': 'Site_ID', 'Solar Supply (kWh)': 'Solar_kWh'}
+                    df = df.rename(columns=renames)
+                    if 'Site_ID' not in df.columns: df['Site_ID'] = df['Site']
+                    if 'Date' in df.columns and 'Solar_kWh' in df.columns:
+                        df = df[['Site_ID', 'Date', 'Solar_kWh']].dropna()
+                        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                        df['Solar_kWh'] = pd.to_numeric(df['Solar_kWh'], errors='coerce')
+                        new_dfs.append(df)
+                        processed_files.append(f)
+        except Exception as e:
+            print(f"    ✗ Error reading file: {e}")
+
+    # 4. Combine & Save
+    if new_dfs:
+        print("Updating History...")
+        new_combined = pd.concat(new_dfs, ignore_index=True)
+        full_df = pd.concat([history_df, new_combined], ignore_index=True)
+        full_df = full_df.sort_values('Date').drop_duplicates(subset=['Site_ID', 'Date'], keep='last')
+        
+        # Save and Upload History
+        full_df.to_parquet("history.parquet", index=False)
+        if hist_files: f_hist = hist_files[0]
+        else: f_hist = drive.CreateFile({'title': 'all_monitoring_data_long.parquet', 'parents': [{'id': FOLDER_ID_DASHBOARD}]})
+        f_hist.SetContentFile("history.parquet")
+        f_hist.Upload()
+        print("  ✓ History Parquet uploaded.")
+        
+        # 5. Generate Pivot Excel (Correcting the Missing Column Issue)
+        print("Generating Production Excel...")
+        metadata = pd.read_excel("metadata.xlsx")
+        metadata['Site_ID'] = metadata['Split'].astype(str).str.strip()
+        metadata['Panels'] = pd.to_numeric(metadata['Panels'], errors='coerce')
+        metadata['Panel Size'] = pd.to_numeric(metadata['Panel Size'], errors='coerce')
+        metadata['Array_Size_kWp'] = metadata['Panels'] * metadata['Panel Size'] / 1000
+        metadata['Panel_Description'] = metadata.apply(lambda r: f"{int(r['Panel Size']) if pd.notna(r['Panel Size']) else '?'} {str(r['Panel Vendor'])} {str(r['Panel Model'])}", axis=1)
+        
+        pivot = full_df.pivot(index='Site_ID', columns='Date', values='Solar_kWh').reset_index()
+        final = metadata.merge(pivot, on='Site_ID', how='left')
+        
+        # --- CRITICAL FIX: Calculate First_Production_Date ---
+        date_cols = [c for c in final.columns if isinstance(c, pd.Timestamp)]
         def get_first_date(row):
             for col in date_cols:
                 if pd.notna(row[col]) and row[col] > 0: return col
             return None
-        final_df['First_Production_Date'] = final_df.apply(get_first_date, axis=1)
+        final['First_Production_Date'] = final.apply(get_first_date, axis=1)
+        final = final.rename(columns={c: c.strftime('%Y-%m-%d') for c in date_cols})
+        # -----------------------------------------------------
+        
+        ts = datetime.now().strftime('%Y%m%d%H%M%S')
+        out_name = f"installed_sites_production{ts}.xlsx"
+        final.to_excel(out_name, index=False)
+        
+        f_out = drive.CreateFile({'title': out_name, 'parents': [{'id': FOLDER_ID_DASHBOARD}]})
+        f_out.SetContentFile(out_name)
+        f_out.Upload()
+        print(f"  ✓ Production Report uploaded: {out_name}")
+        
+        # 6. Archive Files
+        for pf in processed_files:
+            pf['parents'] = [{'id': FOLDER_ID_ARCHIVE}]
+            pf.Upload()
+        print("  ✓ Files archived.")
+        
+        return out_name
+    return None
 
-    return final_df, date_cols
-
-def generate_html(df, date_cols):
-    """
-    Generates a single self-contained HTML dashboard with embedded JSON data.
-    """
-    print("\n[4/5] Generating Dashboard HTML...")
-
-    # 1. PREPARE STATISTICS & GROUPING
-    # ---------------------------------------------------------
+# --- PART 2: DASHBOARD GENERATOR (YOUR ORIGINAL LOGIC) ---
+def run_dashboard(drive, excel_filename):
+    if not excel_filename: return
+    print("\n" + "="*30 + "\nSTARTING DASHBOARD GENERATOR\n" + "="*30)
     
-    # Fleet Totals
+    # 1. Load Data
+    df = pd.read_excel(excel_filename) 
+    
+    # 2. Download DB
+    print("Downloading Database...")
+    db_files = drive.ListFile({'q': f"'{FOLDER_ID_DASHBOARD}' in parents and title = 'solar_performance.db'"}).GetList()
+    db_path = "solar_performance.db"
+    if db_files: db_files[0].GetContentFile(db_path)
+    else: db_path = None
+
+    # --- YOUR DATA PROCESSING LOGIC STARTS HERE ---
+    # (Indentation fixed to be inside the function)
+    
+    site_name_map = {}
+    site_commissioned_map = {}
+    if db_path and os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            site_df_db = pd.read_sql_query("SELECT site_id, site_name, commissioned_date FROM sites", conn)
+            site_name_map = dict(zip(site_df_db['site_id'], site_df_db['site_name']))
+            site_commissioned_map = dict(zip(site_df_db['site_id'], site_df_db['commissioned_date']))
+        except: pass
+        conn.close()
+
+    df['Province'] = df['Site_ID'].apply(extract_province_from_site_id)
+    df['Province_Full'] = df['Province'].apply(get_province_full_name)
+    
+    date_cols = [c for c in df.columns if isinstance(c, str) and len(c) == 10 and c[4] == '-' and c[7] == '-']
+    date_cols_sorted = sorted(date_cols, reverse=True)
+    date_cols_dt = {col: pd.to_datetime(col) for col in date_cols}
+    
+    print(f"  Calculating degradation metrics...")
+    degradation_data = []
+    
+    for idx, row in df.iterrows():
+        site_id = row['Site_ID']
+        array_size = row['Array_Size_kWp']
+        if pd.isna(array_size) or array_size == 0: continue
+        
+        # This caused the error before. Now it is guaranteed to exist because of the fix in run_processor
+        first_date_val = row.get('First_Production_Date')
+        if pd.isna(first_date_val): continue
+        
+        try: first_date = pd.to_datetime(first_date_val)
+        except: continue
+        
+        latest_date = pd.to_datetime(date_cols_sorted[0]) if date_cols_sorted else None
+        if not latest_date: continue
+        
+        comm_end = first_date + timedelta(days=30)
+        last_start = latest_date - timedelta(days=30)
+        
+        c_cols = [c for c in date_cols if first_date <= date_cols_dt[c] <= comm_end]
+        l_cols = [c for c in date_cols if last_start <= date_cols_dt[c] <= latest_date]
+        
+        if c_cols and l_cols:
+            c_vals = [row[c] for c in c_cols if pd.notna(row[c]) and row[c]>0]
+            l_vals = [row[c] for c in l_cols if pd.notna(row[c]) and row[c]>0]
+            if len(c_vals) >= 5 and len(l_vals) >= 5:
+                init_95 = np.percentile(c_vals, 95) / array_size
+                curr_95 = np.percentile(l_vals, 95) / array_size
+                years = (latest_date - first_date).days / 365.25
+                exp = years * 1.5 if years <= 1 else 1.5 + (years-1)*0.4
+                act = (init_95 - curr_95)/init_95 * 100 if init_95 > 0 else 0
+                
+                degradation_data.append({
+                    'site_id': site_id,
+                    'site_name': site_name_map.get(site_id, str(row.get('Site', site_id))),
+                    'actual_degradation': act,
+                    'expected_degradation': exp,
+                    'performance_vs_expected': exp - act,
+                    'years_elapsed': years,
+                    'panel_description': str(row.get('Panel_Description', 'N/A')),
+                    'array_size': array_size,
+                    'province': row['Province_Full'],
+                    'has_recent_data': any(pd.notna(row[d]) and row[d]>0 for d in date_cols_sorted[:3])
+                })
+                
+    degradation_df = pd.DataFrame(degradation_data)
+    
+    # Stats
     total_sites = len(df)
-    sites_with_data = len(df[df['Days_With_Data'] > 0])
+    sites_with_data = len(df[df['Days_With_Data'] > 0]) if 'Days_With_Data' in df.columns else 0
     total_capacity = df['Array_Size_kWp'].sum()
     
-    # Yield Averages (Weighted)
     df_calc = df.fillna(0)
     if total_capacity > 0:
         avg_yield_30d = (df_calc['Avg_Yield_30d_kWh_kWp'] * df_calc['Array_Size_kWp']).sum() / total_capacity
@@ -229,24 +278,20 @@ def generate_html(df, date_cols):
         avg_yield_90d = (df_calc.get('Avg_Yield_90d_kWh_kWp', 0) * df_calc['Array_Size_kWp']).sum() / total_capacity
     else:
         avg_yield_30d = avg_yield_7d = avg_yield_90d = 0
-
-    # Critical Alerts (Offline > 3 days)
-    date_cols_sorted = sorted(date_cols)
-    last_3_days = date_cols_sorted[-3:] if len(date_cols_sorted) >= 3 else date_cols_sorted
     
+    last_3_days = date_cols_sorted[:3] if len(date_cols_sorted) >= 3 else date_cols_sorted
     critical_alerts = []
-    for _, row in df.iterrows():
-        if row['Days_With_Data'] > 0:
-             if all(pd.isna(row[d]) or row[d] == 0 for d in last_3_days):
-                critical_alerts.append(row['Site_ID'])
-
-    # Categories (Excellent, Good, etc.)
+    for idx, row in df.iterrows():
+         if all(pd.isna(row[d]) or row[d] == 0 for d in last_3_days):
+            critical_alerts.append(row['Site_ID'])
+    
+    # Categories
     excellent_sites = df[df['Avg_Yield_30d_kWh_kWp'] > 4.5].fillna(0).to_dict('records')
     good_sites = df[(df['Avg_Yield_30d_kWh_kWp'] > 3.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 4.5)].fillna(0).to_dict('records')
     fair_sites = df[(df['Avg_Yield_30d_kWh_kWp'] > 2.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 3.5)].fillna(0).to_dict('records')
     poor_sites = df[df['Avg_Yield_30d_kWh_kWp'] <= 2.5].fillna(0).to_dict('records')
-
-    # Grouping Helper
+    
+    # Grouping
     def get_weighted_stats(group_col, label):
         valid = df[df['Array_Size_kWp'] > 0].copy()
         if valid.empty: return pd.DataFrame()
@@ -257,171 +302,101 @@ def generate_html(df, date_cols):
         ).reset_index().rename(columns={group_col: label}).sort_values('avg_yield', ascending=False)
         return stats
 
-    # Generate Stats Tables
     province_stats = get_weighted_stats('Province_Full', 'province')
     project_stats = get_weighted_stats('Project', 'project')
     panel_stats = get_weighted_stats('Panel_Description', 'panel_type')
     grid_access_stats = df.groupby('Grid Access').agg(site_count=('Site_ID', 'count')).reset_index()
     power_sources_stats = df.groupby('Power Sources').agg(site_count=('Site_ID', 'count')).reset_index()
 
-    # Timeline Data
+    # Timeline
     commissioning_timeline = df[df['First_Production_Date'].notna()].copy()
     commissioning_timeline['First_Production_Date'] = pd.to_datetime(commissioning_timeline['First_Production_Date'])
     date_counts = commissioning_timeline.sort_values('First_Production_Date').groupby('First_Production_Date').size().reset_index(name='count')
     date_counts['cumulative_count'] = date_counts['count'].cumsum()
     date_counts['First_Production_Date'] = date_counts['First_Production_Date'].dt.strftime('%Y-%m-%d')
-    
-    # 2. PREPARE SITE DETAIL DATA (The Big Object)
-    # ---------------------------------------------------------
+    commissioning_data = date_counts
+
+    # Site Data
     site_data = {}
     for idx, row in df.iterrows():
         site_id = row['Site_ID']
         daily_data = []
-        for d in date_cols:
-            if pd.notna(row[d]):
+        for date_col in date_cols:
+            if pd.notna(row[date_col]):
                 daily_data.append({
-                    'date': d, 
-                    'solar_supply_kwh': float(row[d]),
-                    'specific_yield': float(row[d])/float(row['Array_Size_kWp']) if pd.notna(row['Array_Size_kWp']) and row['Array_Size_kWp'] > 0 else 0
+                    'date': date_col, 
+                    'solar_supply_kwh': float(row[date_col]),
+                    'specific_yield': float(row[date_col])/float(row['Array_Size_kWp']) if pd.notna(row['Array_Size_kWp']) and row['Array_Size_kWp'] > 0 else 0
                 })
         
-        # Helper for safe type conversion for JSON serialization
-        def safe(val, typ=str): 
-            if pd.isna(val): return 'N/A' if typ==str else 0
-            return typ(val)
-
+        def safe_int(value):
+            try: return int(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0
+            except: return 0
+        def safe_float(value):
+            try: return float(pd.to_numeric(value, errors='coerce')) if pd.notna(value) else 0
+            except: return 0
+        
         site_data[site_id] = {
             'site_id': site_id,
-            'site_name': str(row.get('Site', site_id)),
-            'project': safe(row.get('Project')),
-            'panel_description': safe(row.get('Panel_Description')),
-            'array_size_kwp': safe(row.get('Array_Size_kWp'), float),
-            'province': safe(row.get('Province_Full')),
-            'commissioned_date': str(row.get('First_Production_Date')),
+            'site_name': site_name_map.get(site_id, str(row.get('Site', site_id))),
+            'project': str(row.get('Project', '')),
+            'panel_description': str(row.get('Panel_Description', '')),
+            'array_size_kwp': safe_float(row['Array_Size_kWp']),
+            'province': row['Province_Full'],
+            'commissioned_date': site_commissioned_map.get(site_id, str(row.get('First_Production_Date', ''))),
             'daily_data': daily_data,
-            'prod_30d': safe(row.get('Prod_30d_kWh'), float),
-            'avg_yield_30d': safe(row.get('Avg_Yield_30d_kWh_kWp'), float),
-            'grid_access': safe(row.get('Grid Access')),
-            'power_sources': safe(row.get('Power Sources')),
-            'po': safe(row.get('PO')),
-            'panels': safe(row.get('Panels'), int),
-            'panel_size': safe(row.get('Panel Size'), int),
-            'panel_vendor': safe(row.get('Panel Vendor')),
-            'panel_model': safe(row.get('Panel Model')),
+            'grid_access': str(row.get('Grid Access', '')),
+            'power_sources': str(row.get('Power Sources', '')),
+            'po': str(row.get('PO', '')),
+            'panels': safe_int(row.get('Panels')),
+            'panel_size': safe_int(row.get('Panel Size')),
+            'panel_vendor': str(row.get('Panel Vendor', '')),
+            'panel_model': str(row.get('Panel Model', '')),
+            'avg_load': safe_float(row.get('Avg Load', 0))
         }
 
-    # 3. DEGRADATION CALCULATION
-    # ---------------------------------------------------------
-    print("  Calculating degradation metrics...")
-    degradation_list = []
-    # Re-create date index for speed
-    date_dt_map = {c: pd.to_datetime(c) for c in date_cols}
-    latest_dt = pd.to_datetime(date_cols_sorted[-1])
+    print(f"\n[4/4] Generating HTML dashboard...")
     
-    for idx, row in df.iterrows():
-        if pd.isna(row['Array_Size_kWp']) or row['Array_Size_kWp'] == 0: continue
-        if pd.isna(row['First_Production_Date']): continue
-        
-        try: first_dt = pd.to_datetime(str(row['First_Production_Date']))
-        except: continue
-        
-        comm_end = first_dt + timedelta(days=30)
-        last_start = latest_dt - timedelta(days=30)
-        
-        # Fast filtering
-        c_vals = [row[c] for c in date_cols if first_dt <= date_dt_map[c] <= comm_end and pd.notna(row[c]) and row[c]>0]
-        l_vals = [row[c] for c in date_cols if last_start <= date_dt_map[c] <= latest_dt and pd.notna(row[c]) and row[c]>0]
-        
-        if len(c_vals) > 5 and len(l_vals) > 5:
-            arr = row['Array_Size_kWp']
-            init_95 = np.percentile(c_vals, 95) / arr
-            curr_95 = np.percentile(l_vals, 95) / arr
-            years = (latest_dt - first_dt).days / 365.25
-            
-            exp = years * 1.5 if years <= 1 else 1.5 + (years-1)*0.4
-            act = (init_95 - curr_95)/init_95 * 100 if init_95 > 0 else 0
-            
-            recent_cols = date_cols_sorted[-3:]
-            has_recent = any(pd.notna(row[c]) and row[c]>0 for c in recent_cols)
-            
-            degradation_list.append({
-                'site_id': row['Site_ID'],
-                'site_name': str(row.get('Site', row['Site_ID'])),
-                'actual_degradation': act,
-                'expected_degradation': exp,
-                'performance_vs_expected': exp - act,
-                'years_elapsed': years,
-                'has_recent_data': has_recent,
-                'panel_description': str(row.get('Panel_Description', 'N/A')),
-                'array_size': arr
-            })
+    def generate_site_list_html(sites, color):
+        html = ""
+        for site in sites:
+            name = site_name_map.get(site['Site_ID'], site['Site'])
+            yield_val = site.get('Avg_Yield_30d_kWh_kWp', 0)
+            panel = site.get('Panel_Description', 'N/A')
+            size = site.get('Array_Size_kWp', 0)
+            html += f'''<div class="site-list-item" onclick="openSiteModal('{site['Site_ID']}', 'all')" style="cursor:pointer; padding:0.75rem; border-left:3px solid {color}; margin-bottom:0.5rem; background:#f8f9fa; border-radius:0.5rem;">
+                <div style="display:flex; justify-content:space-between;"><div style="font-weight:600;">{name}</div><div style="font-weight:bold;">{yield_val:.2f}</div></div>
+                <div style="font-size:0.8em; color:#666;">{panel} • {size:.1f} kWp</div></div>'''
+        return html
+
+    def generate_stat_cards(stats_df, label_col):
+        html = ""
+        for _, row in stats_df.iterrows():
+            val = row['avg_yield']
+            color = '#27ae60' if val > 4.0 else ('#f39c12' if val > 3.0 else '#e74c3c')
+            html += f'''<div class="stat-card" style="border-left:4px solid {color}; background:white; padding:1rem; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+                <div style="font-size:0.8rem; font-weight:bold; color:#666;">{row[label_col]}</div><div style="font-size:1.5rem; font-weight:bold;">{val:.2f}</div>
+                <div style="font-size:0.8rem; color:#666;">{int(row['site_count'])} sites • {row['total_capacity']:.0f} kWp</div></div>'''
+        return html
+
+    excellent_html = ''.join([generate_site_list_html(excellent_sites, '#27ae60')])
+    good_html = ''.join([generate_site_list_html(good_sites, '#3498db')])
+    fair_html = ''.join([generate_site_list_html(fair_sites, '#f39c12')])
+    poor_html = ''.join([generate_site_list_html(poor_sites, '#e74c3c')])
     
-    degradation_df = pd.DataFrame(degradation_list)
-    print(f"  ✓ Degradation calculated for {len(degradation_df)} sites.")
-
-    # 4. SERIALIZE DATA TO JSON STRINGS
-    # ---------------------------------------------------------
-    # This replaces writing to a file. We convert everything to strings here.
+    province_html = generate_stat_cards(province_stats, 'province')
+    project_html = generate_stat_cards(project_stats, 'project')
+    panel_html = generate_stat_cards(panel_stats, 'panel_type')
     
-    json_site_data = json.dumps(site_data)
-    json_all_ids = json.dumps([str(s) for s in df['Site_ID']])
-    json_degradation = json.dumps(degradation_df.to_dict('records') if not degradation_df.empty else [])
-    
-    json_province = json.dumps(province_stats.to_dict('records'))
-    json_project = json.dumps(project_stats.to_dict('records'))
-    json_panel = json.dumps(panel_stats.to_dict('records'))
-    json_comm = json.dumps(date_counts.to_dict('records'))
-    json_grid = json.dumps(grid_access_stats.to_dict('records'))
-    json_power = json.dumps(power_sources_stats.to_dict('records'))
-    
-    # Site Lists for JS
-    json_exc = json.dumps([str(s['Site_ID']) for s in excellent_sites])
-    json_good = json.dumps([str(s['Site_ID']) for s in good_sites])
-    json_fair = json.dumps([str(s['Site_ID']) for s in fair_sites])
-    json_poor = json.dumps([str(s['Site_ID']) for s in poor_sites])
+    all_site_ids = [str(site_id) for site_id in df['Site_ID'].tolist()]
 
-    # 5. GENERATE HTML STRINGS
-    # ---------------------------------------------------------
-    def make_list_html(sites, color):
-        h = ""
-        for s in sites:
-            name = str(s.get('Site', s.get('Site_ID')))
-            yield_v = s.get('Avg_Yield_30d_kWh_kWp', 0)
-            desc = s.get('Panel_Description', '')
-            size = s.get('Array_Size_kWp', 0)
-            h += f'''<div class="site-list-item" onclick="openSiteModal('{s['Site_ID']}', 'all')" style="cursor:pointer; padding:0.75rem; border-left:3px solid {color}; margin-bottom:0.5rem; background:#f8f9fa; border-radius:0.5rem;">
-            <div style="display:flex; justify-content:space-between;"><div style="font-weight:600;">{name}</div><div style="font-weight:bold;">{yield_val:.2f}</div></div>
-            <div style="font-size:0.8em; color:#666;">{desc} • {size:.1f} kWp</div></div>'''
-        return h if h else '<p style="padding:1rem; color:#666;">No sites in this category</p>'
-
-    html_exc = make_list_html(excellent_sites, '#27ae60')
-    html_good = make_list_html(good_sites, '#3498db')
-    html_fair = make_list_html(fair_sites, '#f39c12')
-    html_poor = make_list_html(poor_sites, '#e74c3c')
-
-    def make_card_html(stats, label_key):
-        h = ""
-        for _, r in stats.iterrows():
-            v = r['avg_yield']
-            c = '#27ae60' if v > 4.0 else ('#f39c12' if v > 3.0 else '#e74c3c')
-            h += f'''<div class="stat-card" style="border-left:4px solid {c}; background:white; padding:1rem; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-            <div style="font-size:0.8rem; font-weight:bold; color:#666;">{r[label_key]}</div><div style="font-size:1.5rem; font-weight:bold;">{v:.2f}</div>
-            <div style="font-size:0.8rem; color:#666;">{int(r['site_count'])} sites • {r['total_capacity']:.0f} kWp</div></div>'''
-        return h
-
-    html_prov = make_card_html(province_stats, 'province')
-    html_proj = make_card_html(project_stats, 'project')
-    html_panel = make_card_html(panel_stats, 'panel_type')
-
-    # 6. ASSEMBLE FINAL HTML
-    # ---------------------------------------------------------
+    # --- HTML TEMPLATE (YOURS) ---
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>Solar Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
         * {{ margin:0; padding:0; box-sizing:border-box; }}
         body {{ font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f4f6f9; color:#333; }}
@@ -444,8 +419,6 @@ def generate_html(df, date_cols):
         .dark-mode h3, .dark-mode h4 {{ color:#e2e8f0; }}
         .hidden {{ display:none; }}
         .scroll-list {{ max-height:400px; overflow-y:auto; }}
-        .export-btn {{ position:absolute; top:1rem; right:1rem; background:#27ae60; color:white; border:none; padding:0.5rem 1rem; border-radius:0.3rem; cursor:pointer; font-size:0.85rem; display:flex; align-items:center; gap:0.5rem; transition:0.2s; }}
-        .export-btn:hover {{ background:#219150; }}
         .modal-overlay {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center; }}
         .modal-overlay.active {{ display:flex; }}
         .modal-content {{ background:white; width:90%; max-width:1200px; height:90%; border-radius:0.75rem; overflow:hidden; display:flex; flex-direction:column; }}
@@ -492,14 +465,12 @@ def generate_html(df, date_cols):
 
     <div class="container">
         <div id="overview-tab">
-            <button class="export-btn" onclick="exportOverview()">📥 Export Overview</button>
-            <div class="stats-grid" style="margin-top:3rem;">
+            <div class="stats-grid">
                 <div class="stat-card blue"><div class="stat-label">Total Sites</div><div class="stat-value">{total_sites}</div><div class="stat-subtitle">{sites_with_data} online</div></div>
-                <div class="stat-card green"><div class="stat-label">Total Capacity</div><div class="stat-value">{total_capacity:.1f}</div><div class="stat-subtitle">kWp installed capacity</div></div>
+                <div class="stat-card green"><div class="stat-label">Total Capacity</div><div class="stat-value">{total_capacity:.1f}</div><div class="stat-subtitle">kWp installed</div></div>
                 <div class="stat-card yellow"><div class="stat-label">Avg Specific Yield</div><div class="stat-value">{avg_yield_30d:.2f}</div><div class="stat-subtitle">kWh/kWp/day (30-day avg)</div></div>
                 <div class="stat-card red"><div class="stat-label">Critical Alerts</div><div class="stat-value">{len(critical_alerts)}</div><div class="stat-subtitle">Sites with 0 production (last 3 days)</div></div>
             </div>
-            
             <div class="chart-container">
                 <h3>Performance & Health</h3>
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1rem;">
@@ -514,7 +485,6 @@ def generate_html(df, date_cols):
                     </div>
                 </div>
             </div>
-            
             <div class="chart-container">
                 <h3>Fleet Composition</h3>
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1rem;">
@@ -526,33 +496,24 @@ def generate_html(df, date_cols):
         </div>
 
         <div id="sites-tab" class="hidden">
-            <button class="export-btn" onclick="exportAllSites()">📥 Export Master List</button>
-            <div style="margin-top:3rem;">
-                <div class="chart-container"><h3>🌟 Excellent Performance (>4.5 kWh/kWp/day) - {len(excellent_sites)} sites</h3><div class="scroll-list">{html_exc}</div></div>
-                <div class="chart-container"><h3>✅ Good Performance (3.5-4.5 kWh/kWp/day) - {len(good_sites)} sites</h3><div class="scroll-list">{html_good}</div></div>
-                <div class="chart-container"><h3>⚠️ Fair Performance (2.5-3.5 kWh/kWp/day) - {len(fair_sites)} sites</h3><div class="scroll-list">{html_fair}</div></div>
-                <div class="chart-container"><h3>🚨 Poor Performance (<2.5 kWh/kWp/day) - {len(poor_sites)} sites</h3><div class="scroll-list">{html_poor}</div></div>
-            </div>
+            <div class="chart-container"><h3>🌟 Excellent Performance (>4.5) - {len(excellent_sites)} sites</h3><div class="scroll-list">{excellent_html}</div></div>
+            <div class="chart-container"><h3>✅ Good Performance (3.5-4.5) - {len(good_sites)} sites</h3><div class="scroll-list">{good_html}</div></div>
+            <div class="chart-container"><h3>⚠️ Fair Performance (2.5-3.5) - {len(fair_sites)} sites</h3><div class="scroll-list">{fair_html}</div></div>
+            <div class="chart-container"><h3>🚨 Poor Performance (<2.5) - {len(poor_sites)} sites</h3><div class="scroll-list">{poor_html}</div></div>
         </div>
 
         <div id="degradation-tab" class="hidden">
-            <button class="export-btn" onclick="exportDegradation()">📥 Export Degradation Report</button>
-            <div style="margin-top:3rem;">
-                <div class="chart-container"><h3>🚨 Offline / No Data</h3><div id="offline-sites-list" class="scroll-list"></div></div>
-                <div class="chart-container"><h3>🔴 High Degradation (>50%)</h3><div id="high-degradation-list" class="scroll-list"></div></div>
-                <div class="chart-container"><h3>⚠️ Medium Degradation (30-50%)</h3><div id="medium-degradation-list" class="scroll-list"></div></div>
-                <div class="chart-container"><h3>✅ Low Degradation (0-30%)</h3><div id="low-degradation-list" class="scroll-list"></div></div>
-                <div class="chart-container"><h3>🌟 Better Than Expected</h3><div id="better-degradation-list" class="scroll-list"></div></div>
-            </div>
+            <div class="chart-container"><h3>🚨 Offline / No Data</h3><div id="offline-sites-list" class="scroll-list"></div></div>
+            <div class="chart-container"><h3>🔴 High Degradation (>50%)</h3><div id="high-degradation-list" class="scroll-list"></div></div>
+            <div class="chart-container"><h3>⚠️ Medium Degradation (30-50%)</h3><div id="medium-degradation-list" class="scroll-list"></div></div>
+            <div class="chart-container"><h3>✅ Low Degradation (0-30%)</h3><div id="low-degradation-list" class="scroll-list"></div></div>
+            <div class="chart-container"><h3>🌟 Better Than Expected</h3><div id="better-degradation-list" class="scroll-list"></div></div>
         </div>
 
         <div id="performance-tab" class="hidden">
-            <button class="export-btn" onclick="exportPerformanceStats()">📥 Export Performance Stats</button>
-            <div style="margin-top:3rem;">
-                <div class="chart-container"><h3>🏢 Performance by Province</h3><div class="stats-grid">{html_prov}</div></div>
-                <div class="chart-container"><h3>📋 Performance by Project</h3><div class="stats-grid">{html_proj}</div></div>
-                <div class="chart-container"><h3>⚡ Performance by Panel Type</h3><div class="stats-grid">{html_panel}</div></div>
-            </div>
+            <div class="performance-section province"><h3>🏢 Province Performance</h3><div class="stats-grid">{province_html}</div></div>
+            <div class="performance-section project"><h3>📋 Project Performance</h3><div class="stats-grid">{project_html}</div></div>
+            <div class="performance-section panel"><h3>⚡ Panel Type Performance</h3><div class="stats-grid">{panel_html}</div></div>
         </div>
         
         <div id="site-modal" class="modal-overlay" onclick="handleModalClick(event)">
@@ -584,22 +545,17 @@ def generate_html(df, date_cols):
     </div>
 
     <script>
-    // Data Injection
-    const siteData = {json_site_data};
-    const allSiteIds = {json_all_ids};
-    const degradationData = {json_degradation};
-    const provinceStats = {json_province};
-    const projectStats = {json_project};
-    const panelStats = {json_panel};
-    const commissioningData = {json_comm};
-    const gridAccessData = {json_grid};
-    const powerSourcesData = {json_power};
+    const siteData = {json.dumps(site_data)};
+    const allSiteIds = {json.dumps(all_site_ids)};
+    const degradationData = {json.dumps(degradation_df.to_dict('records') if len(degradation_df) > 0 else [])};
+    const gridAccessData = {json.dumps(grid_access_stats.to_dict('records'))};
+    const powerSourcesData = {json.dumps(power_sources_stats.to_dict('records'))};
+    const commissioningData = {json.dumps(commissioning_timeline_data[['First_Production_Date', 'cumulative_count', 'count']].to_dict('records') if len(commissioning_timeline_data) > 0 else [])};
     
-    // Site Lists
-    const excellentIds = {json_exc};
-    const goodIds = {json_good};
-    const fairIds = {json_fair};
-    const poorIds = {json_poor};
+    const excellentIds = {json.dumps([str(s['Site_ID']) for s in excellent_sites])};
+    const goodIds = {json.dumps([str(s['Site_ID']) for s in good_sites])};
+    const fairIds = {json.dumps([str(s['Site_ID']) for s in fair_sites])};
+    const poorIds = {json.dumps([str(s['Site_ID']) for s in poor_sites])};
     
     const offlineIds=[], highDegIds=[], medDegIds=[], lowDegIds=[], betterDegIds=[];
     let currentSiteId=null, currentSiteIndex=0, currentSiteList=[], currentCategory='all', siteCharts=[], currentPeriod='90d';
@@ -631,8 +587,8 @@ def generate_html(df, date_cols):
         else currentSiteList=allSiteIds;
         
         currentSiteIndex = currentSiteList.indexOf(id);
-        const site = siteData[id];
-        document.getElementById('modal-site-name').innerText = site.site_name;
+        const s = siteData[id];
+        document.getElementById('modal-site-name').innerText = s.site_name;
         document.getElementById('site-modal').classList.add('active');
         
         const btns = document.querySelectorAll('.period-button');
@@ -725,43 +681,36 @@ def generate_html(df, date_cols):
             fill('better-degradation-list', betterDegIds, '#27ae60', 'better-degradation');
         }}
     }};
-    
-    // --- EXPORT FUNCTIONS ---
-    function exportToExcel(data, name, sheet="Sheet1") {{
-        if(!data || !data.length) {{ alert("No data"); return; }}
-        const ws = XLSX.utils.json_to_sheet(data);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, sheet);
-        XLSX.writeFile(wb, name + ".xlsx");
-    }}
-    function exportOverview() {{ exportToExcel(commissioningData, "Commissioning_Timeline"); }}
-    function exportAllSites() {{
-        const list = Object.values(siteData).map(s => {{ const {{daily_data, ...rest}} = s; return rest; }});
-        exportToExcel(list, "Master_Site_List");
-    }}
-    function exportDegradation() {{ exportToExcel(degradationData, "Degradation_Report"); }}
-    function exportPerformanceStats() {{
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(provinceStats), "Province");
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(projectStats), "Project");
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(panelStats), "Panel");
-        XLSX.writeFile(wb, "Performance_Stats.xlsx");
-    }}
     </script>
 </body>
 </html>"""
+
+    # 3. Upload Result to Google Drive
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    html_name = f"installed_sites_dashboard_{ts}.html"
     
-    # --- SAVE FILE ---
-    # Create output path based on input file location (or current directory)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    # If running locally/manually, default to current directory
-    out_path = f"installed_sites_dashboard_{timestamp}.html"
+    with open(html_name, "w", encoding="utf-8") as f:
+        f.write(html_content)
     
-    # Save HTML
-    with open(out_path, 'w', encoding='utf-8') as f:
+    with open("index.html", "w", encoding="utf-8") as f:
         f.write(html_content)
         
-    print(f"\n✓ Dashboard generated successfully: {out_path}")
+    print(f"Uploading {html_name}...")
+    f_out = drive.CreateFile({'title': html_name, 'parents': [{'id': FOLDER_ID_DASHBOARD}]})
+    f_out.SetContentFile(html_name)
+    f_out.Upload()
+    print(f"  ✓ Dashboard uploaded successfully!")
 
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    main()
+    # 1. Authenticate
+    drive_service = authenticate_drive()
+    
+    # 2. Run Processor (Part 1)
+    new_excel_file = run_processor(drive_service)
+    
+    # 3. Run Dashboard (Part 2)
+    if new_excel_file:
+        run_dashboard(drive_service, new_excel_file)
+    else:
+        print("No new data processed, skipping dashboard generation.")
