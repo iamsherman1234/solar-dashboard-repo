@@ -2,9 +2,8 @@ name: Update Dashboard
 
 on:
   schedule:
-    # Runs at 00:00 UTC (07:00 Cambodia Time) on MONDAYS
-    - cron: '0 0 * * 1'
-  workflow_dispatch:      # Allows manual button click
+    - cron: '0 0 * * 1' # Mondays at 7 AM Cambodia
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -32,25 +31,32 @@ jobs:
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
         run: python -u main.py
 
-      # --- PREPARE FILES FOR RELEASE ---
+      # --- SMART RELEASE STEP (Checks for file first) ---
       - name: Prepare Release Artifacts
+        id: check_file
         run: |
-          # 1. Generate a Date Tag (e.g., v2025.11.21)
-          DATE_TAG=$(date +'%Y.%m.%d')
-          echo "TAG_NAME=v$DATE_TAG" >> $GITHUB_ENV
-          
-          # 2. Find the generated HTML file (The one with the timestamp)
-          # Since the runner is fresh, there will be only one file matching this pattern.
-          HTML_FILE=$(ls installed_sites_dashboard_*.html | head -n 1)
-          
-          # 3. Zip the file (Easier to download)
-          zip "Solar_Dashboard_Report_$DATE_TAG.zip" "$HTML_FILE"
-          
-          # 4. Save filename to variable for the next step
-          echo "RELEASE_ASSET=Solar_Dashboard_Report_$DATE_TAG.zip" >> $GITHUB_ENV
+          # Check if any HTML dashboard file was created
+          if ls installed_sites_dashboard_*.html 1> /dev/null 2>&1; then
+            echo "File found. Preparing release..."
+            
+            DATE_TAG=$(date +'%Y.%m.%d')
+            echo "TAG_NAME=v$DATE_TAG" >> $GITHUB_ENV
+            
+            HTML_FILE=$(ls installed_sites_dashboard_*.html | head -n 1)
+            cp "$HTML_FILE" "Solar_Dashboard_Report_$DATE_TAG.html"
+            
+            zip "Solar_Dashboard_Report_$DATE_TAG.zip" "Solar_Dashboard_Report_$DATE_TAG.html"
+            
+            echo "RELEASE_ASSET=Solar_Dashboard_Report_$DATE_TAG.zip" >> $GITHUB_ENV
+            echo "HAS_NEW_DATA=true" >> $GITHUB_ENV
+          else
+            echo "No new dashboard generated (No new data)."
+            echo "HAS_NEW_DATA=false" >> $GITHUB_ENV
+          fi
 
-      # --- CREATE GITHUB RELEASE ---
+      # Only run Release if we actually have new data
       - name: Create Release
+        if: env.HAS_NEW_DATA == 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG_NAME }}
@@ -61,3 +67,16 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only deploy Pages if we have new data
+      - name: Deploy to GitHub Pages
+        if: env.HAS_NEW_DATA == 'true'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,*.parquet,requirements.txt,*.zip,installed_sites_dashboard_*.html'
+          destination_dir: ./
+          keep_files: false 
+          user_name: 'SolarBot'
+          user_email: 'bot@solar.com'
