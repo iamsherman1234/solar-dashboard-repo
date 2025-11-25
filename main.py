@@ -208,336 +208,560 @@ def process_data(pivot_df):
     return final_df, date_cols
 
 def generate_html(df, date_cols):
-    print("Generating HTML...", flush=True)
-    active_sites = df['Total_Production'].notna().sum()
+    """
+    Generates a single self-contained HTML dashboard with embedded JSON data.
+    """
+    print("\n[4/5] Generating Dashboard HTML...")
 
-    # ... (Keep metadata loading logic) ...
-    site_name_map = {}
-    site_commissioned_map = {}
-    if os.path.exists(ADDITIONAL_INFO):
-        try:
-            db_df = pd.read_csv(ADDITIONAL_INFO)
-            if 'site_id' in db_df.columns:
-                site_name_map = dict(zip(db_df['site_id'], db_df.get('site_name', db_df['site_id'])))
-                site_commissioned_map = dict(zip(db_df['site_id'], db_df.get('commissioned_date', '')))
-        except: pass
-
-    def get_province(site_id):
-        if isinstance(site_id, str) and len(site_id) >= 2: return PROVINCE_MAPPING.get(site_id[:2].upper(), site_id[:2])
-        return 'Unknown'
-    df['Province_Full'] = df['Site_ID'].apply(get_province)
-
-    # --- DEGRADATION CALCULATION ---
-    # ... (Keep existing degradation logic) ...
-    degradation_data = []
-    sorted_dates = sorted(date_cols) if date_cols else []
+    # 1. PREPARE STATISTICS & GROUPING
+    # ---------------------------------------------------------
     
-    for idx, row in df.iterrows():
-        site_id = row['Site_ID']
-        array_size = row['Array_Size_kWp']
-        if pd.isna(array_size) or array_size == 0: continue
-        first_date = row['First_Production_Date']
-        if pd.isna(first_date): continue
-        
-        latest_date = sorted_dates[-1]
-        comm_cols = [c for c in sorted_dates if first_date <= c < first_date + pd.Timedelta(days=30)]
-        last_cols = [c for c in sorted_dates if latest_date - pd.Timedelta(days=30) <= c <= latest_date]
-        
-        if comm_cols and last_cols:
-            comm_vals = [row[c] for c in comm_cols if pd.notna(row[c]) and row[c] > 0]
-            last_vals = [row[c] for c in last_cols if pd.notna(row[c]) and row[c] > 0]
-            
-            if comm_vals and last_vals:
-                initial_95th = np.percentile(comm_vals, 95) / array_size
-                latest_95th = np.percentile(last_vals, 95) / array_size
-                years_elapsed = (latest_date - first_date).days / 365.25
-                expected = 1.5 + (years_elapsed - 1) * 0.4 if years_elapsed > 1 else years_elapsed * 1.5
-                actual_deg = ((initial_95th - latest_95th) / initial_95th * 100)
-                
-                degradation_data.append({
-                    'site_id': site_id,
-                    'site_name': site_name_map.get(site_id, row['Site']),
-                    'actual_degradation': round(actual_deg, 1),
-                    'expected_degradation': round(expected, 1),
-                    'years_elapsed': round(years_elapsed, 1)
-                })
-    degradation_df = pd.DataFrame(degradation_data)
+    # Fleet Totals
+    total_sites = len(df)
+    sites_with_data = len(df[df['Days_With_Data'] > 0])
+    total_capacity = df['Array_Size_kWp'].sum()
+    
+    # Yield Averages (Weighted)
+    df_calc = df.fillna(0)
+    if total_capacity > 0:
+        avg_yield_30d = (df_calc['Avg_Yield_30d_kWh_kWp'] * df_calc['Array_Size_kWp']).sum() / total_capacity
+        avg_yield_7d = (df_calc.get('Avg_Yield_7d_kWh_kWp', 0) * df_calc['Array_Size_kWp']).sum() / total_capacity
+        avg_yield_90d = (df_calc.get('Avg_Yield_90d_kWh_kWp', 0) * df_calc['Array_Size_kWp']).sum() / total_capacity
+    else:
+        avg_yield_30d = avg_yield_7d = avg_yield_90d = 0
 
-    # --- AGGREGATIONS ---
+    # Critical Alerts (Offline > 3 days)
+    date_cols_sorted = sorted(date_cols)
+    last_3_days = date_cols_sorted[-3:] if len(date_cols_sorted) >= 3 else date_cols_sorted
+    
+    critical_alerts = []
+    for _, row in df.iterrows():
+        if row['Days_With_Data'] > 0:
+             if all(pd.isna(row[d]) or row[d] == 0 for d in last_3_days):
+                critical_alerts.append(row['Site_ID'])
+
+    # Categories (Excellent, Good, etc.)
+    excellent_sites = df[df['Avg_Yield_30d_kWh_kWp'] > 4.5].fillna(0).to_dict('records')
+    good_sites = df[(df['Avg_Yield_30d_kWh_kWp'] > 3.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 4.5)].fillna(0).to_dict('records')
+    fair_sites = df[(df['Avg_Yield_30d_kWh_kWp'] > 2.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 3.5)].fillna(0).to_dict('records')
+    poor_sites = df[df['Avg_Yield_30d_kWh_kWp'] <= 2.5].fillna(0).to_dict('records')
+
+    # Grouping Helper
+    def get_weighted_stats(group_col, label):
+        valid = df[df['Array_Size_kWp'] > 0].copy()
+        if valid.empty: return pd.DataFrame()
+        stats = valid.groupby(group_col).agg(
+            site_count=('Site_ID', 'count'),
+            total_capacity=('Array_Size_kWp', 'sum'),
+            avg_yield=('Avg_Yield_30d_kWh_kWp', lambda x: (x * valid.loc[x.index, 'Array_Size_kWp']).sum() / valid.loc[x.index, 'Array_Size_kWp'].sum())
+        ).reset_index().rename(columns={group_col: label}).sort_values('avg_yield', ascending=False)
+        return stats
+
+    # Generate Stats Tables
+    province_stats = get_weighted_stats('Province_Full', 'province')
+    project_stats = get_weighted_stats('Project', 'project')
+    panel_stats = get_weighted_stats('Panel_Description', 'panel_type')
     grid_access_stats = df.groupby('Grid Access').agg(site_count=('Site_ID', 'count')).reset_index()
     power_sources_stats = df.groupby('Power Sources').agg(site_count=('Site_ID', 'count')).reset_index()
-    
-    comm_timeline = df[df['First_Production_Date'].notna()].sort_values('First_Production_Date')
-    comm_counts = comm_timeline.groupby('First_Production_Date').size().reset_index(name='count')
-    comm_counts['cumulative_count'] = comm_counts['count'].cumsum()
-    comm_counts['date_str'] = comm_counts['First_Production_Date'].dt.strftime('%Y-%m-%d')
-    commissioning_data = comm_counts[['date_str', 'cumulative_count']].to_dict('records')
 
-    # --- DATA PREPARATION FOR JSON ---
-    site_data = {}
-    date_str_map = {d: d.strftime('%Y-%m-%d') for d in date_cols}
+    # Timeline Data
+    commissioning_timeline = df[df['First_Production_Date'].notna()].copy()
+    commissioning_timeline['First_Production_Date'] = pd.to_datetime(commissioning_timeline['First_Production_Date'])
+    date_counts = commissioning_timeline.sort_values('First_Production_Date').groupby('First_Production_Date').size().reset_index(name='count')
+    date_counts['cumulative_count'] = date_counts['count'].cumsum()
+    date_counts['First_Production_Date'] = date_counts['First_Production_Date'].dt.strftime('%Y-%m-%d')
     
+    # 2. PREPARE SITE DETAIL DATA (The Big Object)
+    # ---------------------------------------------------------
+    site_data = {}
     for idx, row in df.iterrows():
         site_id = row['Site_ID']
-        chart_dates = []
-        chart_vals = []
-        chart_yields = []
-        
-        array_size = float(row['Array_Size_kWp']) if pd.notna(row['Array_Size_kWp']) and row['Array_Size_kWp'] > 0 else 1
-        
+        daily_data = []
         for d in date_cols:
-            val = row[d]
-            if pd.notna(val):
-                chart_dates.append(date_str_map[d])
-                chart_vals.append(round(float(val), 2))
-                chart_yields.append(round(float(val) / array_size, 2))
+            if pd.notna(row[d]):
+                daily_data.append({
+                    'date': d, 
+                    'solar_supply_kwh': float(row[d]),
+                    'specific_yield': float(row[d])/float(row['Array_Size_kWp']) if pd.notna(row['Array_Size_kWp']) and row['Array_Size_kWp'] > 0 else 0
+                })
+        
+        # Helper for safe type conversion for JSON serialization
+        def safe(val, typ=str): 
+            if pd.isna(val): return 'N/A' if typ==str else 0
+            return typ(val)
 
         site_data[site_id] = {
-            'name': site_name_map.get(site_id, str(row['Site'])),
-            'proj': str(row.get('Project', 'N/A')),
-            'grid': str(row.get('Grid Access', 'N/A')),
-            'panel': str(row['Panel_Description']),
-            'cap': round(float(row['Array_Size_kWp']), 2),
-            'prov': row['Province_Full'],
-            'yield': round(float(row.get('Avg_Yield_30d_kWh_kWp', 0)), 2),
-            'comm': site_commissioned_map.get(site_id, str(row['First_Production_Date'])),
-            'd': chart_dates,
-            'p': chart_vals,
-            'y': chart_yields
+            'site_id': site_id,
+            'site_name': str(row.get('Site', site_id)),
+            'project': safe(row.get('Project')),
+            'panel_description': safe(row.get('Panel_Description')),
+            'array_size_kwp': safe(row.get('Array_Size_kWp'), float),
+            'province': safe(row.get('Province_Full')),
+            'commissioned_date': str(row.get('First_Production_Date')),
+            'daily_data': daily_data,
+            'prod_30d': safe(row.get('Prod_30d_kWh'), float),
+            'avg_yield_30d': safe(row.get('Avg_Yield_30d_kWh_kWp'), float),
+            'grid_access': safe(row.get('Grid Access')),
+            'power_sources': safe(row.get('Power Sources')),
+            'po': safe(row.get('PO')),
+            'panels': safe(row.get('Panels'), int),
+            'panel_size': safe(row.get('Panel Size'), int),
+            'panel_vendor': safe(row.get('Panel Vendor')),
+            'panel_model': safe(row.get('Panel Model')),
         }
 
-    # --- STATS ---
-    excellent = df[df['Avg_Yield_30d_kWh_kWp'] > 4.5].to_dict('records')
-    good = df[(df['Avg_Yield_30d_kWh_kWp'] >= 3.5) & (df['Avg_Yield_30d_kWh_kWp'] <= 4.5)].to_dict('records')
-    fair = df[(df['Avg_Yield_30d_kWh_kWp'] >= 2.5) & (df['Avg_Yield_30d_kWh_kWp'] < 3.5)].to_dict('records')
-    poor = df[df['Avg_Yield_30d_kWh_kWp'] < 2.5].to_dict('records')
-
-    prov_stats = df.groupby('Province_Full').agg(
-        site_count=('Site_ID', 'count'),
-        avg_yield=('Avg_Yield_30d_kWh_kWp', 'mean')
-    ).reset_index().sort_values('avg_yield', ascending=False)
+    # 3. DEGRADATION CALCULATION
+    # ---------------------------------------------------------
+    print("  Calculating degradation metrics...")
+    degradation_list = []
+    # Re-create date index for speed
+    date_dt_map = {c: pd.to_datetime(c) for c in date_cols}
+    latest_dt = pd.to_datetime(date_cols_sorted[-1])
     
-    proj_stats = df.groupby('Project').agg(
-        site_count=('Site_ID', 'count'),
-        avg_yield=('Avg_Yield_30d_kWh_kWp', 'mean')
-    ).reset_index().sort_values('avg_yield', ascending=False)
+    for idx, row in df.iterrows():
+        if pd.isna(row['Array_Size_kWp']) or row['Array_Size_kWp'] == 0: continue
+        if pd.isna(row['First_Production_Date']): continue
+        
+        try: first_dt = pd.to_datetime(str(row['First_Production_Date']))
+        except: continue
+        
+        comm_end = first_dt + timedelta(days=30)
+        last_start = latest_dt - timedelta(days=30)
+        
+        # Fast filtering
+        c_vals = [row[c] for c in date_cols if first_dt <= date_dt_map[c] <= comm_end and pd.notna(row[c]) and row[c]>0]
+        l_vals = [row[c] for c in date_cols if last_start <= date_dt_map[c] <= latest_dt and pd.notna(row[c]) and row[c]>0]
+        
+        if len(c_vals) > 5 and len(l_vals) > 5:
+            arr = row['Array_Size_kWp']
+            init_95 = np.percentile(c_vals, 95) / arr
+            curr_95 = np.percentile(l_vals, 95) / arr
+            years = (latest_dt - first_dt).days / 365.25
+            
+            exp = years * 1.5 if years <= 1 else 1.5 + (years-1)*0.4
+            act = (init_95 - curr_95)/init_95 * 100 if init_95 > 0 else 0
+            
+            recent_cols = date_cols_sorted[-3:]
+            has_recent = any(pd.notna(row[c]) and row[c]>0 for c in recent_cols)
+            
+            degradation_list.append({
+                'site_id': row['Site_ID'],
+                'site_name': str(row.get('Site', row['Site_ID'])),
+                'actual_degradation': act,
+                'expected_degradation': exp,
+                'performance_vs_expected': exp - act,
+                'years_elapsed': years,
+                'has_recent_data': has_recent,
+                'panel_description': str(row.get('Panel_Description', 'N/A')),
+                'array_size': arr
+            })
     
-    panel_stats = df.groupby('Panel_Description').agg(
-        site_count=('Site_ID', 'count'),
-        avg_yield=('Avg_Yield_30d_kWh_kWp', 'mean')
-    ).reset_index().sort_values('avg_yield', ascending=False)
+    degradation_df = pd.DataFrame(degradation_list)
+    print(f"  ✓ Degradation calculated for {len(degradation_df)} sites.")
 
-    # --- SAVE DATA TO JSON FILE ---
-    full_data_object = {
-        'siteData': site_data,
-        'degData': degradation_df.to_dict('records') if not degradation_df.empty else [],
-        'commData': commissioning_data,
-        'gridData': grid_access_stats.to_dict('records'),
-        'powerData': power_sources_stats.to_dict('records')
-    }
+    # 4. SERIALIZE DATA TO JSON STRINGS
+    # ---------------------------------------------------------
+    # This replaces writing to a file. We convert everything to strings here.
     
-    print(f"Saving JSON Data to {OUTPUT_JSON}...", flush=True)
-    with open(OUTPUT_JSON, 'w') as f:
-        json.dump(full_data_object, f)
+    json_site_data = json.dumps(site_data)
+    json_all_ids = json.dumps([str(s) for s in df['Site_ID']])
+    json_degradation = json.dumps(degradation_df.to_dict('records') if not degradation_df.empty else [])
+    
+    json_province = json.dumps(province_stats.to_dict('records'))
+    json_project = json.dumps(project_stats.to_dict('records'))
+    json_panel = json.dumps(panel_stats.to_dict('records'))
+    json_comm = json.dumps(date_counts.to_dict('records'))
+    json_grid = json.dumps(grid_access_stats.to_dict('records'))
+    json_power = json.dumps(power_sources_stats.to_dict('records'))
+    
+    # Site Lists for JS
+    json_exc = json.dumps([str(s['Site_ID']) for s in excellent_sites])
+    json_good = json.dumps([str(s['Site_ID']) for s in good_sites])
+    json_fair = json.dumps([str(s['Site_ID']) for s in fair_sites])
+    json_poor = json.dumps([str(s['Site_ID']) for s in poor_sites])
 
-    # --- HTML GENERATION (Fetching external JSON) ---
-    def gen_list(s, color, cat):
-        name = site_name_map.get(s['Site_ID'], s['Site'])
-        return f'''<div class="site-list-item" onclick="openSiteModal('{s['Site_ID']}')" style="cursor:pointer; padding:0.5rem; border-left:3px solid {color}; margin-bottom:0.25rem; background:#f8f9fa;">
-            <div style="display:flex; justify-content:space-between;"><strong>{name}</strong><span style="color:{color}">{s['Avg_Yield_30d_kWh_kWp']:.2f}</span></div>
-            <div style="font-size:0.7em; color:gray;">{s['Panel_Description']}</div></div>'''
+    # 5. GENERATE HTML STRINGS
+    # ---------------------------------------------------------
+    def make_list_html(sites, color):
+        h = ""
+        for s in sites:
+            name = str(s.get('Site', s.get('Site_ID')))
+            yield_v = s.get('Avg_Yield_30d_kWh_kWp', 0)
+            desc = s.get('Panel_Description', '')
+            size = s.get('Array_Size_kWp', 0)
+            h += f'''<div class="site-list-item" onclick="openSiteModal('{s['Site_ID']}', 'all')" style="cursor:pointer; padding:0.75rem; border-left:3px solid {color}; margin-bottom:0.5rem; background:#f8f9fa; border-radius:0.5rem;">
+            <div style="display:flex; justify-content:space-between;"><div style="font-weight:600;">{name}</div><div style="font-weight:bold;">{yield_val:.2f}</div></div>
+            <div style="font-size:0.8em; color:#666;">{desc} • {size:.1f} kWp</div></div>'''
+        return h if h else '<p style="padding:1rem; color:#666;">No sites in this category</p>'
 
-    exc_html = ''.join([gen_list(s, '#27ae60', 'excellent') for s in excellent])
-    good_html = ''.join([gen_list(s, '#3498db', 'good') for s in good])
-    fair_html = ''.join([gen_list(s, '#f39c12', 'fair') for s in fair])
-    poor_html = ''.join([gen_list(s, '#e74c3c', 'poor') for s in poor])
+    html_exc = make_list_html(excellent_sites, '#27ae60')
+    html_good = make_list_html(good_sites, '#3498db')
+    html_fair = make_list_html(fair_sites, '#f39c12')
+    html_poor = make_list_html(poor_sites, '#e74c3c')
 
-    def gen_stat(label, val, sub):
-        return f'''<div style="padding:0.5rem; background:white; border-bottom:1px solid #eee;">
-            <div style="font-weight:bold; font-size:0.8em;">{label}</div>
-            <div style="font-weight:bold;">{val}</div><div style="font-size:0.7em; color:gray;">{sub}</div></div>'''
+    def make_card_html(stats, label_key):
+        h = ""
+        for _, r in stats.iterrows():
+            v = r['avg_yield']
+            c = '#27ae60' if v > 4.0 else ('#f39c12' if v > 3.0 else '#e74c3c')
+            h += f'''<div class="stat-card" style="border-left:4px solid {c}; background:white; padding:1rem; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+            <div style="font-size:0.8rem; font-weight:bold; color:#666;">{r[label_key]}</div><div style="font-size:1.5rem; font-weight:bold;">{v:.2f}</div>
+            <div style="font-size:0.8rem; color:#666;">{int(r['site_count'])} sites • {r['total_capacity']:.0f} kWp</div></div>'''
+        return h
 
-    prov_html = ''.join([gen_stat(r['Province_Full'], f"{r['avg_yield']:.2f}", f"{r['site_count']} sites") for _, r in prov_stats.iterrows()])
-    proj_html = ''.join([gen_stat(r['Project'], f"{r['avg_yield']:.2f}", f"{r['site_count']} sites") for _, r in proj_stats.iterrows()])
-    panel_html = ''.join([gen_stat(r['Panel_Description'], f"{r['avg_yield']:.2f}", f"{r['site_count']} sites") for _, r in panel_stats.iterrows()])
+    html_prov = make_card_html(province_stats, 'province')
+    html_proj = make_card_html(project_stats, 'project')
+    html_panel = make_card_html(panel_stats, 'panel_type')
 
-    # Minimal HTML that loads the JSON
+    # 6. ASSEMBLE FINAL HTML
+    # ---------------------------------------------------------
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Solar Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <style>
-        body {{ font-family: sans-serif; background: #f4f6f9; margin: 0; color:#333; }}
-        .header {{ background: #2c3e50; color: white; padding: 1rem; }}
-        .nav {{ background: white; padding: 0.5rem; display: flex; gap: 1rem; border-bottom: 1px solid #ddd; }}
-        .nav-item {{ cursor: pointer; padding: 0.5rem; }}
-        .nav-item.active {{ color: #3498db; font-weight: bold; }}
-        .container {{ padding: 1rem; max-width: 1400px; margin: 0 auto; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }}
-        .card {{ background: white; padding: 1rem; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-        .hidden {{ display: none; }}
-        .modal {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; }}
-        .modal.active {{ display: flex; justify-content: center; align-items: center; }}
-        .modal-content {{ background: white; width: 95%; max-width: 1000px; height: 90%; padding: 1rem; overflow-y: auto; }}
-        .btn {{ padding: 0.5rem 1rem; cursor: pointer; background: #eee; border: none; margin-right: 0.5rem; }}
-        .btn.active {{ background: #3498db; color: white; }}
-        #loading {{ padding: 2rem; text-align: center; font-size: 1.2rem; color: #666; }}
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        body {{ font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f4f6f9; color:#333; }}
+        body.dark-mode {{ background:#1a1a1a; color:#e0e0e0; }}
+        .header {{ background:linear-gradient(135deg, #3498db, #2980b9); color:white; padding:1.5rem 2rem; display:flex; justify-content:space-between; align-items:center; box-shadow:0 4px 6px rgba(0,0,0,0.1); }}
+        .dark-mode .header {{ background:linear-gradient(135deg, #2c3e50, #34495e); }}
+        .theme-toggle {{ background:rgba(255,255,255,0.2); border:1px solid rgba(255,255,255,0.3); padding:0.5rem 1rem; color:white; border-radius:0.5rem; cursor:pointer; }}
+        .nav {{ background:#e9ecef; padding:0 2rem; display:flex; gap:2rem; border-bottom:1px solid #dee2e6; }}
+        .dark-mode .nav {{ background:#2d3748; border-bottom:1px solid #4a5568; }}
+        .nav-item {{ padding:1rem 0.5rem; cursor:pointer; border-bottom:3px solid transparent; font-weight:500; color:#6c757d; }}
+        .nav-item.active {{ color:#3498db; border-bottom-color:#3498db; }}
+        .dark-mode .nav-item {{ color:#a0aec0; }}
+        .dark-mode .nav-item.active {{ color:#4299e1; border-bottom-color:#4299e1; }}
+        .container {{ max-width:1400px; margin:0 auto; padding:2rem; }}
+        .stats-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:1.5rem; margin-bottom:2rem; }}
+        .stat-card {{ background:white; border-radius:0.75rem; padding:1.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1); border-left:4px solid #3498db; }}
+        .dark-mode .stat-card {{ background:#2d3748; }}
+        .chart-container {{ background:white; border-radius:0.75rem; padding:1.5rem; margin-bottom:1.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1); position:relative; }}
+        .dark-mode .chart-container {{ background:#2d3748; }}
+        .dark-mode h3, .dark-mode h4 {{ color:#e2e8f0; }}
+        .hidden {{ display:none; }}
+        .scroll-list {{ max-height:400px; overflow-y:auto; }}
+        .export-btn {{ position:absolute; top:1rem; right:1rem; background:#27ae60; color:white; border:none; padding:0.5rem 1rem; border-radius:0.3rem; cursor:pointer; font-size:0.85rem; display:flex; align-items:center; gap:0.5rem; transition:0.2s; }}
+        .export-btn:hover {{ background:#219150; }}
+        .modal-overlay {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center; }}
+        .modal-overlay.active {{ display:flex; }}
+        .modal-content {{ background:white; width:90%; max-width:1200px; height:90%; border-radius:0.75rem; overflow:hidden; display:flex; flex-direction:column; }}
+        .dark-mode .modal-content {{ background:#2d3748; }}
+        .modal-header {{ background:linear-gradient(135deg, #3498db, #2980b9); color:white; padding:1rem 1.5rem; display:flex; justify-content:space-between; align-items:center; }}
+        .dark-mode .modal-header {{ background:linear-gradient(135deg, #2c3e50, #34495e); }}
+        .modal-body {{ padding:1.5rem; overflow-y:auto; flex:1; }}
+        .site-info-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:0.75rem; margin-bottom:1rem; }}
+        .site-info-item {{ background:#f8f9fa; padding:0.75rem; border-left:3px solid #3498db; border-radius:0.5rem; }}
+        .dark-mode .site-info-item {{ background:#1a365d; border-left-color:#2b6cb0; }}
+        .site-info-label {{ font-size:0.75rem; color:#6c757d; font-weight:600; }}
+        .dark-mode .site-info-label {{ color:#a0aec0; }}
+        .site-info-value {{ font-size:1.125rem; font-weight:600; color:#333; }}
+        .dark-mode .site-info-value {{ color:#e2e8f0; }}
+        .time-period-selector {{ display:flex; gap:0.5rem; margin-bottom:1rem; background:#e9ecef; padding:0.375rem; border-radius:0.5rem; }}
+        .dark-mode .time-period-selector {{ background:#1a365d; }}
+        .period-button {{ flex:1; padding:0.5rem; border:none; background:white; cursor:pointer; border-radius:0.3rem; transition:0.2s; }}
+        .period-button.active {{ background:linear-gradient(135deg, #3498db, #2980b9); color:white; }}
+        .dark-mode .period-button {{ background:#2d3748; color:#a0aec0; }}
+        .dark-mode .period-button.active {{ background:linear-gradient(135deg, #2b6cb0, #2c5282); }}
+        .chart-wrapper {{ background:white; padding:1rem; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1); }}
+        .dark-mode .chart-wrapper {{ background:#1a365d; }}
+        .stats-summary {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:0.75rem; margin-top:1rem; }}
+        .summary-card {{ background:linear-gradient(135deg, #3498db, #2980b9); color:white; padding:1rem; border-radius:0.5rem; text-align:center; }}
+        .summary-card.green {{ background:linear-gradient(135deg, #27ae60, #229954); }}
+        .summary-card.yellow {{ background:linear-gradient(135deg, #f39c12, #e67e22); }}
+        .summary-card.red {{ background:linear-gradient(135deg, #e74c3c, #c0392b); }}
+        .summary-label {{ font-size:0.75rem; opacity:0.9; margin-bottom:0.25rem; }}
+        .summary-value {{ font-size:1.5rem; font-weight:700; }}
     </style>
 </head>
 <body>
-    <div class="header"><h1>🌞 Solar Dashboard</h1><div>{len(df)} Sites | {active_sites} Active</div></div>
+    <div class="header">
+        <div class="header-content"><h1>Solar Performance Dashboard</h1><p>Data from {total_sites} sites • Capacity: {total_capacity:.1f} kWp</p></div>
+        <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
+    </div>
+
     <div class="nav">
-        <div class="nav-item active" onclick="showTab('overview')">Overview</div>
-        <div class="nav-item" onclick="showTab('sites')">Sites</div>
-        <div class="nav-item" onclick="showTab('degradation')">Degradation</div>
-        <div class="nav-item" onclick="showTab('performance')">Analysis</div>
+        <div class="nav-item active" onclick="showTab(this, 'overview')">Overview</div>
+        <div class="nav-item" onclick="showTab(this, 'sites')">All Sites</div>
+        <div class="nav-item" onclick="showTab(this, 'degradation')">Degradation Analysis</div>
+        <div class="nav-item" onclick="showTab(this, 'performance')">Performance Categories</div>
     </div>
 
-    <div id="loading">Loading dashboard data...</div>
-
-    <div id="main-content" class="hidden">
-        <div id="overview" class="container">
-            <div class="grid">
-                <div class="card"><h3>Total Capacity</h3><h2>{df['Array_Size_kWp'].sum():,.0f} kWp</h2></div>
-                <div class="card"><h3>Avg Yield (30d)</h3><h2>{df['Avg_Yield_30d_kWh_kWp'].mean():.2f}</h2></div>
-                <div class="card"><h3>Excellent Sites</h3><h2>{len(excellent)}</h2></div>
+    <div class="container">
+        <div id="overview-tab">
+            <button class="export-btn" onclick="exportOverview()">📥 Export Overview</button>
+            <div class="stats-grid" style="margin-top:3rem;">
+                <div class="stat-card blue"><div class="stat-label">Total Sites</div><div class="stat-value">{total_sites}</div><div class="stat-subtitle">{sites_with_data} online</div></div>
+                <div class="stat-card green"><div class="stat-label">Total Capacity</div><div class="stat-value">{total_capacity:.1f}</div><div class="stat-subtitle">kWp installed capacity</div></div>
+                <div class="stat-card yellow"><div class="stat-label">Avg Specific Yield</div><div class="stat-value">{avg_yield_30d:.2f}</div><div class="stat-subtitle">kWh/kWp/day (30-day avg)</div></div>
+                <div class="stat-card red"><div class="stat-label">Critical Alerts</div><div class="stat-value">{len(critical_alerts)}</div><div class="stat-subtitle">Sites with 0 production (last 3 days)</div></div>
             </div>
-            <div class="card" style="margin-top:1rem; height:300px;"><canvas id="commChart"></canvas></div>
-            <div class="grid" style="margin-top:1rem;">
-                <div class="card" style="height:300px;"><canvas id="gridChart"></canvas></div>
-                <div class="card" style="height:300px;"><canvas id="powerChart"></canvas></div>
+            
+            <div class="chart-container">
+                <h3>Performance & Health</h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1rem;">
+                    <div><canvas id="distChart"></canvas></div>
+                    <div>
+                        <h4 style="margin-bottom:1rem;">Fleet Health Metrics</h4>
+                        <div style="padding:1rem; background:#f8f9fa; border-radius:0.5rem;">
+                            <p><strong>Last 7 Days:</strong> {avg_yield_7d:.2f} kWh/kWp/day</p>
+                            <p><strong>Last 30 Days:</strong> {avg_yield_30d:.2f} kWh/kWp/day</p>
+                            <p><strong>Last 90 Days:</strong> {avg_yield_90d:.2f} kWh/kWp/day</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Fleet Composition</h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1rem;">
+                    <div><h4 style="margin-bottom:1rem;">Grid Access</h4><canvas id="gridAccessChart" style="max-height:300px;"></canvas></div>
+                    <div><h4 style="margin-bottom:1rem;">Power Sources</h4><canvas id="powerSourcesChart" style="max-height:300px;"></canvas></div>
+                </div>
+            </div>
+            <div class="chart-container"><h3>Commissioning Timeline</h3><canvas id="commissioningChart" style="margin-top:1rem;"></canvas></div>
+        </div>
+
+        <div id="sites-tab" class="hidden">
+            <button class="export-btn" onclick="exportAllSites()">📥 Export Master List</button>
+            <div style="margin-top:3rem;">
+                <div class="chart-container"><h3>🌟 Excellent Performance (>4.5 kWh/kWp/day) - {len(excellent_sites)} sites</h3><div class="scroll-list">{html_exc}</div></div>
+                <div class="chart-container"><h3>✅ Good Performance (3.5-4.5 kWh/kWp/day) - {len(good_sites)} sites</h3><div class="scroll-list">{html_good}</div></div>
+                <div class="chart-container"><h3>⚠️ Fair Performance (2.5-3.5 kWh/kWp/day) - {len(fair_sites)} sites</h3><div class="scroll-list">{html_fair}</div></div>
+                <div class="chart-container"><h3>🚨 Poor Performance (<2.5 kWh/kWp/day) - {len(poor_sites)} sites</h3><div class="scroll-list">{html_poor}</div></div>
             </div>
         </div>
 
-        <div id="sites" class="container hidden">
-            <div class="grid">
-                <div class="card"><h3>Excellent</h3><div style="max-height:600px; overflow-y:auto">{exc_html}</div></div>
-                <div class="card"><h3>Good</h3><div style="max-height:600px; overflow-y:auto">{good_html}</div></div>
-                <div class="card"><h3>Fair</h3><div style="max-height:600px; overflow-y:auto">{fair_html}</div></div>
-                <div class="card"><h3>Poor</h3><div style="max-height:600px; overflow-y:auto">{poor_html}</div></div>
+        <div id="degradation-tab" class="hidden">
+            <button class="export-btn" onclick="exportDegradation()">📥 Export Degradation Report</button>
+            <div style="margin-top:3rem;">
+                <div class="chart-container"><h3>🚨 Offline / No Data</h3><div id="offline-sites-list" class="scroll-list"></div></div>
+                <div class="chart-container"><h3>🔴 High Degradation (>50%)</h3><div id="high-degradation-list" class="scroll-list"></div></div>
+                <div class="chart-container"><h3>⚠️ Medium Degradation (30-50%)</h3><div id="medium-degradation-list" class="scroll-list"></div></div>
+                <div class="chart-container"><h3>✅ Low Degradation (0-30%)</h3><div id="low-degradation-list" class="scroll-list"></div></div>
+                <div class="chart-container"><h3>🌟 Better Than Expected</h3><div id="better-degradation-list" class="scroll-list"></div></div>
             </div>
         </div>
 
-        <div id="degradation" class="container hidden">
-            <div class="card"><h3>Degradation Analysis</h3><div id="deg-list"></div></div>
+        <div id="performance-tab" class="hidden">
+            <button class="export-btn" onclick="exportPerformanceStats()">📥 Export Performance Stats</button>
+            <div style="margin-top:3rem;">
+                <div class="chart-container"><h3>🏢 Performance by Province</h3><div class="stats-grid">{html_prov}</div></div>
+                <div class="chart-container"><h3>📋 Performance by Project</h3><div class="stats-grid">{html_proj}</div></div>
+                <div class="chart-container"><h3>⚡ Performance by Panel Type</h3><div class="stats-grid">{html_panel}</div></div>
+            </div>
         </div>
-
-        <div id="performance" class="container hidden">
-            <div class="grid"><div class="card"><h3>Province</h3>{prov_html}</div><div class="card"><h3>Project</h3>{proj_html}</div><div class="card"><h3>Panel</h3>{panel_html}</div></div>
+        
+        <div id="site-modal" class="modal-overlay" onclick="handleModalClick(event)">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <h2 id="modal-site-name">Site Details</h2>
+                    <div style="display:flex; gap:10px;">
+                        <button onclick="navigateSite(-1)" style="background:rgba(255,255,255,0.2); border:none; color:white; padding:5px 15px; border-radius:5px; cursor:pointer;">‹</button>
+                        <button onclick="navigateSite(1)" style="background:rgba(255,255,255,0.2); border:none; color:white; padding:5px 15px; border-radius:5px; cursor:pointer;">›</button>
+                        <button class="modal-close" onclick="closeSiteModal()" style="background:none; border:none; font-size:24px; color:white; cursor:pointer;">&times;</button>
+                    </div>
+                </div>
+                <div class="modal-body" id="modal-body">
+                    <div class="time-period-selector">
+                        <button class="period-button" onclick="changePeriod(this, '7d')">Last 7 Days</button>
+                        <button class="period-button" onclick="changePeriod(this, '30d')">Last 30 Days</button>
+                        <button class="period-button active" onclick="changePeriod(this, '90d')">Last 90 Days</button>
+                        <button class="period-button" onclick="changePeriod(this, 'all')">All Data</button>
+                    </div>
+                    <div class="site-info-grid" id="site-info-grid"></div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem;">
+                        <div class="chart-wrapper"><h4>Daily Production</h4><canvas id="dailyProductionChart"></canvas></div>
+                        <div class="chart-wrapper"><h4>Specific Yield</h4><canvas id="yieldTrendChart"></canvas></div>
+                    </div>
+                    <div class="stats-summary" id="site-stats-summary"></div>
+                </div>
+            </div>
         </div>
     </div>
-
-    <div id="site-modal" class="modal"><div class="modal-content">
-        <div style="display:flex; justify-content:space-between;"><h2>Site Details</h2><button onclick="document.getElementById('site-modal').classList.remove('active')">Close</button></div>
-        <div style="margin-bottom:1rem;">
-            <button class="btn" onclick="loadSiteData('7d')">7 Days</button>
-            <button class="btn" onclick="loadSiteData('30d')">30 Days</button>
-            <button class="btn active" onclick="loadSiteData('90d')">90 Days</button>
-            <button class="btn" onclick="loadSiteData('all')">All</button>
-        </div>
-        <div id="modal-info" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:1rem; margin-bottom:1rem; background:#f8f9fa; padding:1rem;"></div>
-        <div style="height:300px; margin-bottom:1rem;"><canvas id="dailyChart"></canvas></div>
-        <div style="height:300px;"><canvas id="yieldChart"></canvas></div>
-    </div></div>
 
     <script>
-        let siteData = {{}};
-        let currentId = null;
-        let charts = [];
+    // Data Injection
+    const siteData = {json_site_data};
+    const allSiteIds = {json_all_ids};
+    const degradationData = {json_degradation};
+    const provinceStats = {json_province};
+    const projectStats = {json_project};
+    const panelStats = {json_panel};
+    const commissioningData = {json_comm};
+    const gridAccessData = {json_grid};
+    const powerSourcesData = {json_power};
+    
+    // Site Lists
+    const excellentIds = {json_exc};
+    const goodIds = {json_good};
+    const fairIds = {json_fair};
+    const poorIds = {json_poor};
+    
+    const offlineIds=[], highDegIds=[], medDegIds=[], lowDegIds=[], betterDegIds=[];
+    let currentSiteId=null, currentSiteIndex=0, currentSiteList=[], currentCategory='all', siteCharts=[], currentPeriod='90d';
 
-        // FETCH DATA ON LOAD
-        fetch('dashboard_data.json')
-            .then(response => response.json())
-            .then(data => {{
-                siteData = data.siteData;
-                initDashboard(data);
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('main-content').classList.remove('hidden');
-            }})
-            .catch(err => {{
-                console.error("Error loading data:", err);
-                document.getElementById('loading').innerText = "Error loading data.";
+    function showTab(el, tab) {{
+        document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
+        el.classList.add('active');
+        document.querySelectorAll('[id$="-tab"]').forEach(t=>t.classList.add('hidden'));
+        document.getElementById(tab+'-tab').classList.remove('hidden');
+    }}
+
+    function toggleTheme() {{
+        document.body.classList.toggle('dark-mode');
+        const b = document.querySelector('.theme-toggle');
+        b.innerText = document.body.classList.contains('dark-mode') ? '☀️ Light Mode' : '🌙 Dark Mode';
+    }}
+
+    function openSiteModal(id, cat) {{
+        currentSiteId = id; currentCategory = cat||'all';
+        if(cat==='excellent') currentSiteList=excellentIds;
+        else if(cat==='good') currentSiteList=goodIds;
+        else if(cat==='fair') currentSiteList=fairIds;
+        else if(cat==='poor') currentSiteList=poorIds;
+        else if(cat==='offline') currentSiteList=offlineIds;
+        else if(cat==='high-degradation') currentSiteList=highDegIds;
+        else if(cat==='medium-degradation') currentSiteList=medDegIds;
+        else if(cat==='low-degradation') currentSiteList=lowDegIds;
+        else if(cat==='better-degradation') currentSiteList=betterDegIds;
+        else currentSiteList=allSiteIds;
+        
+        currentSiteIndex = currentSiteList.indexOf(id);
+        const site = siteData[id];
+        document.getElementById('modal-site-name').innerText = site.site_name;
+        document.getElementById('site-modal').classList.add('active');
+        
+        const btns = document.querySelectorAll('.period-button');
+        btns.forEach(b=>b.classList.remove('active'));
+        btns[2].classList.add('active');
+        loadSiteData(btns[2], '90d');
+    }}
+
+    function closeSiteModal() {{
+        document.getElementById('site-modal').classList.remove('active');
+        siteCharts.forEach(c=>c.destroy()); siteCharts=[];
+    }}
+
+    function handleModalClick(e) {{ if(e.target.id==='site-modal') closeSiteModal(); }}
+
+    function navigateSite(dir) {{
+        const newIdx = currentSiteIndex+dir;
+        if(newIdx>=0 && newIdx<currentSiteList.length) openSiteModal(currentSiteList[newIdx], currentCategory);
+    }}
+
+    function changePeriod(btn, period) {{
+        currentPeriod = period;
+        document.querySelectorAll('.period-button').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        loadSiteData(btn, period);
+    }}
+
+    function loadSiteData(btn, period) {{
+        const site = siteData[currentSiteId];
+        const now = new Date();
+        const days = {{'7d':7, '30d':30, '90d':90}};
+        let data = site.daily_data;
+        
+        if(period!=='all') {{
+            const cut = new Date(now-days[period]*24*60*60*1000);
+            data = data.filter(d=>new Date(d.date)>=cut);
+        }}
+        const valid = data.filter(d=>!isNaN(d.solar_supply_kwh));
+        
+        document.getElementById('site-info-grid').innerHTML = `
+            <div class="site-info-item"><div class="site-info-label">Panel</div><div class="site-info-value">${{site.panel_description}}</div></div>
+            <div class="site-info-item"><div class="site-info-label">Size</div><div class="site-info-value">${{site.array_size_kwp.toFixed(2)}} kWp</div></div>
+            <div class="site-info-item"><div class="site-info-label">Project</div><div class="site-info-value">${{site.project}}</div></div>
+            <div class="site-info-item"><div class="site-info-label">Grid</div><div class="site-info-value">${{site.grid_access}}</div></div>
+            <div class="site-info-item"><div class="site-info-label">Province</div><div class="site-info-value">${{site.province}}</div></div>
+            <div class="site-info-item"><div class="site-info-label">Comm.</div><div class="site-info-value">${{site.commissioned_date}}</div></div>`;
+        
+        const total = valid.reduce((a,b)=>a+b.solar_supply_kwh,0);
+        const avg = valid.length ? valid.reduce((a,b)=>a+b.specific_yield,0)/valid.length : 0;
+        
+        document.getElementById('site-stats-summary').innerHTML = `
+            <div class="summary-card"><div class="summary-label">Total</div><div class="summary-value">${{total.toFixed(0)}}</div></div>
+            <div class="summary-card green"><div class="summary-label">Avg Yield</div><div class="summary-value">${{avg.toFixed(2)}}</div></div>`;
+
+        if(siteCharts.length) {{ siteCharts.forEach(c=>c.destroy()); siteCharts=[]; }}
+        siteCharts.push(new Chart(document.getElementById('dailyProductionChart').getContext('2d'), {{
+            type:'line', data:{{ labels:valid.map(d=>d.date), datasets:[{{ label:'kWh', data:valid.map(d=>d.solar_supply_kwh), borderColor:'#3498db', backgroundColor:'rgba(52,152,219,0.1)', fill:true }}] }},
+            options:{{ responsive:true, maintainAspectRatio:false, scales:{{ y:{{ beginAtZero:true }} }} }}
+        }}));
+        siteCharts.push(new Chart(document.getElementById('yieldTrendChart').getContext('2d'), {{
+            type:'line', data:{{ labels:valid.map(d=>d.date), datasets:[{{ label:'Yield', data:valid.map(d=>d.specific_yield), borderColor:'#27ae60', backgroundColor:'rgba(39,174,96,0.1)', fill:true }}] }},
+            options:{{ responsive:true, maintainAspectRatio:false, scales:{{ y:{{ beginAtZero:true }} }} }}
+        }}));
+    }}
+
+    window.onload = function() {{
+        new Chart(document.getElementById('gridAccessChart'), {{ type:'pie', data:{{ labels:gridAccessData.map(d=>d.grid_access), datasets:[{{ data:gridAccessData.map(d=>d.site_count), backgroundColor:['#3498db','#27ae60','#f39c12','#e74c3c','#9b59b6'] }}] }} }});
+        new Chart(document.getElementById('powerSourcesChart'), {{ type:'pie', data:{{ labels:powerSourcesData.map(d=>d.power_sources), datasets:[{{ data:powerSourcesData.map(d=>d.site_count), backgroundColor:['#e74c3c','#3498db','#27ae60','#f39c12','#9b59b6'] }}] }} }});
+        new Chart(document.getElementById('distChart'), {{ type:'doughnut', data:{{ labels:['Excellent','Good','Fair','Poor'], datasets:[{{ data:[{len(excellent_sites)},{len(good_sites)},{len(fair_sites)},{len(poor_sites)}], backgroundColor:['#27ae60','#3498db','#f39c12','#e74c3c'] }}] }} }});
+        new Chart(document.getElementById('commissioningChart'), {{ type:'line', data:{{ labels:commissioningData.map(d=>d.First_Production_Date), datasets:[{{ label:'Sites', data:commissioningData.map(d=>d.cumulative_count), borderColor:'#3498db', fill:true }}] }} }});
+
+        if(degradationData.length > 0) {{
+            degradationData.forEach(d => {{
+                if(!d.has_recent_data) offlineIds.push(d.site_id);
+                else if(d.actual_degradation > 50) highDegIds.push(d.site_id);
+                else if(d.actual_degradation >= 30) medDegIds.push(d.site_id);
+                else if(d.actual_degradation >= 0) lowDegIds.push(d.site_id);
+                else betterDegIds.push(d.site_id);
             }});
-
-        function initDashboard(data) {{
-            // Charts
-            new Chart(document.getElementById('commChart'), {{type:'line', data:{{labels:data.commData.map(d=>d.date_str), datasets:[{{label:'Sites', data:data.commData.map(d=>d.cumulative_count), borderColor:'#3498db', fill:true}}]}}, options:{{maintainAspectRatio:false}} }});
-            new Chart(document.getElementById('gridChart'), {{type:'pie', data:{{labels:data.gridData.map(d=>d['Grid Access']), datasets:[{{data:data.gridData.map(d=>d.site_count), backgroundColor:['#3498db','#27ae60','#f39c12','#e74c3c']}}]}}, options:{{maintainAspectRatio:false}} }});
-            new Chart(document.getElementById('powerChart'), {{type:'pie', data:{{labels:data.powerData.map(d=>d['Power Sources']), datasets:[{{data:data.powerData.map(d=>d.site_count), backgroundColor:['#e74c3c','#3498db','#f39c12','#9b59b6']}}]}}, options:{{maintainAspectRatio:false}} }});
-
-            // Deg List
-            const degList = document.getElementById('deg-list');
-            const degData = data.degData.sort((a,b) => b.actual_degradation - a.actual_degradation);
-            let dHtml = '';
-            degData.forEach(s => {{
-                let c = s.actual_degradation > 30 ? '#e74c3c' : '#27ae60';
-                dHtml += `<div style="padding:0.5rem; border-left:4px solid ${{c}}; background:#f8f9fa; margin-bottom:0.5rem;"><b>${{s.site_name}}</b>: ${{s.actual_degradation}}% (Exp: ${{s.expected_degradation}}%)</div>`;
-            }});
-            degList.innerHTML = dHtml || 'No data';
+            const mkHtml = (s,c,cat) => `<div onclick="openSiteModal('${{s.site_id}}','${{cat}}')" style="padding:0.75rem; border-left:3px solid ${{c}}; background:#f8f9fa; margin-bottom:0.5rem; cursor:pointer; border-radius:0.5rem;"><div style="display:flex; justify-content:space-between;"><div style="font-weight:600;">${{s.site_name}}</div><div style="font-weight:bold;">${{s.actual_degradation.toFixed(1)}}%</div></div><div style="font-size:0.8em; color:#666;">${{s.panel_description}} • ${{s.array_size.toFixed(1)}} kWp</div></div>`;
+            const fill = (id, list, c, cat) => {{
+                const el = document.getElementById(id);
+                const sites = degradationData.filter(d => list.includes(d.site_id));
+                el.innerHTML = sites.length ? sites.map(s=>mkHtml(s,c,cat)).join('') : '<div style="padding:1rem; color:#666;">None</div>';
+            }};
+            fill('offline-sites-list', offlineIds, '#e74c3c', 'offline');
+            fill('high-degradation-list', highDegIds, '#e74c3c', 'high-degradation');
+            fill('medium-degradation-list', medDegIds, '#f39c12', 'medium-degradation');
+            fill('low-degradation-list', lowDegIds, '#27ae60', 'low-degradation');
+            fill('better-degradation-list', betterDegIds, '#27ae60', 'better-degradation');
         }}
-
-        function showTab(id) {{
-            document.querySelectorAll('.container').forEach(el => el.classList.add('hidden'));
-            document.getElementById(id).classList.remove('hidden');
-            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-            event.target.classList.add('active');
-        }}
-
-        window.openSiteModal = function(id) {{
-            currentId = id;
-            const s = siteData[id];
-            if(!s) return;
-            document.getElementById('site-modal').classList.add('active');
-            document.getElementById('modal-info').innerHTML = `<div><b>${{s.name}}</b></div><div>${{s.prov}}</div><div>${{s.cap}} kWp</div><div>${{s.panel}}</div>`;
-            loadSiteData('90d');
-        }}
-
-        window.loadSiteData = function(period) {{
-            const s = siteData[currentId];
-            if(!s) return;
-            
-            let dates = s.d;
-            let prod = s.p;
-            let yld = s.y;
-            
-            if(period !== 'all') {{
-                const limit = {{'7d':7, '30d':30, '90d':90}}[period];
-                const startIdx = Math.max(0, dates.length - limit);
-                dates = dates.slice(startIdx);
-                prod = prod.slice(startIdx);
-                yld = yld.slice(startIdx);
-            }}
-
-            charts.forEach(c => c.destroy());
-            charts = [];
-            
-            charts.push(new Chart(document.getElementById('dailyChart'), {{type:'bar', data:{{labels:dates, datasets:[{{label:'kWh', data:prod, backgroundColor:'#3498db'}}]}}, options:{{maintainAspectRatio:false}} }}));
-            charts.push(new Chart(document.getElementById('yieldChart'), {{type:'line', data:{{labels:dates, datasets:[{{label:'Yield', data:yld, borderColor:'#27ae60'}}]}}, options:{{maintainAspectRatio:false}} }}));
-        }}
+    }};
+    
+    // --- EXPORT FUNCTIONS ---
+    function exportToExcel(data, name, sheet="Sheet1") {{
+        if(!data || !data.length) {{ alert("No data"); return; }}
+        const ws = XLSX.utils.json_to_sheet(data);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, sheet);
+        XLSX.writeFile(wb, name + ".xlsx");
+    }}
+    function exportOverview() {{ exportToExcel(commissioningData, "Commissioning_Timeline"); }}
+    function exportAllSites() {{
+        const list = Object.values(siteData).map(s => {{ const {{daily_data, ...rest}} = s; return rest; }});
+        exportToExcel(list, "Master_Site_List");
+    }}
+    function exportDegradation() {{ exportToExcel(degradationData, "Degradation_Report"); }}
+    function exportPerformanceStats() {{
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(provinceStats), "Province");
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(projectStats), "Project");
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(panelStats), "Panel");
+        XLSX.writeFile(wb, "Performance_Stats.xlsx");
+    }}
     </script>
 </body>
 </html>"""
     
-    with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
+    # --- SAVE FILE ---
+    # Create output path based on input file location (or current directory)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # If running locally/manually, default to current directory
+    out_path = f"installed_sites_dashboard_{timestamp}.html"
+    
+    # Save HTML
+    with open(out_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
-    
-    if os.path.exists('temp_master.parquet'):
-        os.remove('temp_master.parquet')
-    
-    print(f"Dashboard generated: {OUTPUT_HTML} and {OUTPUT_JSON}", flush=True)
-
-def main():
-    service = get_drive_service()
-    pivot_df = sync_and_load_data(service)
-    
-    if not pivot_df.empty:
-        final_df, date_cols = process_data(pivot_df)
-        generate_html(final_df, date_cols)
-    else:
-        print("No data found to process.", flush=True)
+        
+    print(f"\n✓ Dashboard generated successfully: {out_path}")
 
 if __name__ == "__main__":
     main()
