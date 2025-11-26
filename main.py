@@ -175,6 +175,39 @@ def run_processor(drive):
         pivot = full_df.pivot(index='Site_ID', columns='Date', values='Solar_kWh').reset_index()
         final = metadata.merge(pivot, on='Site_ID', how='left')
         
+
+
+        # Add this RIGHT AFTER this line:
+        # final = metadata.merge(pivot, on='Site_ID', how='left')
+
+        # Calculate yield metrics
+        print("Calculating yield metrics...")
+        date_cols = [c for c in final.columns if isinstance(c, pd.Timestamp)]
+        date_cols_sorted = sorted(date_cols, reverse=True)
+
+        # Calculate Days_With_Data
+        def count_days_with_data(row):
+            return sum(1 for col in date_cols if pd.notna(row[col]) and row[col] > 0)
+
+        final['Days_With_Data'] = final.apply(count_days_with_data, axis=1)
+
+        # Calculate average yields for different periods
+        def calc_avg_yield(row, days):
+            if pd.isna(row['Array_Size_kWp']) or row['Array_Size_kWp'] == 0:
+                return 0
+            cols_to_use = date_cols_sorted[:days] if len(date_cols_sorted) >= days else date_cols_sorted
+            valid_values = [row[col] for col in cols_to_use if pd.notna(row[col]) and row[col] > 0]
+            if not valid_values:
+                return 0
+            return (sum(valid_values) / len(valid_values)) / row['Array_Size_kWp']
+
+        final['Avg_Yield_7d_kWh_kWp'] = final.apply(lambda row: calc_avg_yield(row, 7), axis=1)
+        final['Avg_Yield_30d_kWh_kWp'] = final.apply(lambda row: calc_avg_yield(row, 30), axis=1)
+        final['Avg_Yield_90d_kWh_kWp'] = final.apply(lambda row: calc_avg_yield(row, 90), axis=1)
+
+        # THEN continue with First_Production_Date calculation and the rest...
+        # Fix: Calculate First Production Date
+
         # Fix: Calculate First Production Date
         date_cols = [c for c in final.columns if isinstance(c, pd.Timestamp)]
         def get_first_date(row):
