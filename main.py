@@ -613,7 +613,7 @@ def run_dashboard(drive, excel_filename):
     const degradationData = {json.dumps(degradation_df.to_dict('records') if len(degradation_df) > 0 else [])};
     const gridAccessData = {json.dumps(grid_access_stats.to_dict('records'))};
     const powerSourcesData = {json.dumps(power_sources_stats.to_dict('records'))};
-    const commissioningData = {json.dumps(commissioning_timeline_data[['First_Production_Date', 'cumulative_count', 'count']].to_dict('records') if len(commissioning_timeline_data) > 0 else [])};
+    const commissioningData = {json.dumps(commissioning_timeline[['First_Production_Date', 'cumulative_count', 'count']].to_dict('records') if len(commissioning_timeline) > 0 else [])};
     
     const excellentIds = {json.dumps([str(s['Site_ID']) for s in excellent_sites])};
     const goodIds = {json.dumps([str(s['Site_ID']) for s in good_sites])};
