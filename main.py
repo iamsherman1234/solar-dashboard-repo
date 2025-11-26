@@ -219,7 +219,7 @@ def run_processor(drive):
         
         ts = datetime.now().strftime('%Y%m%d%H%M%S')
         out_name = f"installed_sites_production{ts}.xlsx"
-        final.to_excel(out_name, index=False)
+        final.to_excel(out_name, index=False, sheet_name='Installed Sites Production')
         
         f_out = drive.CreateFile({'title': out_name, 'parents': [{'id': FOLDER_ID_DASHBOARD}]})
         f_out.SetContentFile(out_name)
