@@ -620,7 +620,7 @@ def run_dashboard(drive, excel_filename):
     const fairIds = {json.dumps([str(s['Site_ID']) for s in fair_sites])};
     const poorIds = {json.dumps([str(s['Site_ID']) for s in poor_sites])};
     
-    const offlineIds=[], highDegIds=[], medDegIds=[], lowDegIds=[], betterDegIds=[];
+    const offlineIds=[], highDegradationIds=[], mediumDegradationIds=[], lowDegradationIds=[], betterDegradationIds=[];
     let currentSiteId=null, currentSiteIndex=0, currentSiteList=[], currentCategory='all', siteCharts=[], currentPeriod='90d';
 
     function showTab(el, tab) {{
