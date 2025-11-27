@@ -1,0 +1,41 @@
+name: Deploy to Firebase
+
+on:
+  workflow_dispatch: # Button to run manually
+  workflow_run:
+    workflows: ["Daily Solar Dashboard"] # <--- MUST MATCH the 'name:' inside daily_update.yml
+    types:
+      - completed
+
+jobs:
+  deploy-website:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }} # Only run if data processing succeeded
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Catch the HTML file passed from the first workflow
+      - name: Download Dashboard
+        uses: actions/download-artifact@v4
+        with:
+          name: solar-dashboard-html # Must match the name in Step 1
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. Prepare the folder structure for Firebase
+      - name: Prepare Public Folder
+        run: |
+          mkdir -p public
+          # Rename the long file to index.html so it becomes the homepage
+          mv installed_sites_dashboard_*.html public/index.html
+
+      # 3. Deploy to Firebase
+      - name: Deploy to Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: your-firebase-project-id  # <--- REPLACE THIS with your actual Project ID
