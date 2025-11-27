@@ -1,6 +1,6 @@
 import os
-import io
 import json
+import io
 import shutil
 from pathlib import Path
 from google.oauth2.credentials import Credentials
@@ -8,9 +8,9 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 # --- CONFIGURATION ---
-FOLDER_MONITORING = '1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm' 
-FOLDER_ARCHIVES = '19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G'   
-FOLDER_OUTPUT = '1jhw0lRHwG8ogRCL9g9Qu3RAsN0gkNLPl'     
+FOLDER_MONITORING = '1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm' # 01_Monitoring_Data
+FOLDER_ARCHIVES = '19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G'   # 02_Archives
+FOLDER_OUTPUT = '1fqRaaM9Zw5NwWdSuc8OFRfiHTeemspK2'     # 03_Output (UPDATED)
 
 def authenticate():
     """Authenticates using individual GitHub Secrets for User OAuth"""
@@ -24,7 +24,9 @@ def authenticate():
     if not all([client_id, client_secret, refresh_token]):
         if os.path.exists('token.json'):
             print("⚠ Using local token.json for authentication")
-            creds = Credentials.from_authorized_user_file('token.json', ['https://www.googleapis.com/auth/drive'])
+            with open('token.json', 'r') as token:
+                creds_data = json.load(token)
+                creds = Credentials.from_authorized_user_info(creds_data)
             return build('drive', 'v3', credentials=creds)
         else:
             raise ValueError("❌ Missing Environment Variables: GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, or GDRIVE_REFRESH_TOKEN")
