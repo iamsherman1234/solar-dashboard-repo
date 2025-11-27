@@ -17,12 +17,12 @@ jobs:
         uses: actions/checkout@v4
 
       # 1. Catch the HTML file passed from the first workflow
+      # 1. Catch the FOLDER passed from the first workflow
       - name: Download Dashboard
         uses: actions/download-artifact@v4
         with:
-          name: solar-dashboard-html # Must match the name in Step 1
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: solar-dashboard-build 
+          path: mobile_build  # Download it to local folder
 
       # 2. Prepare the folder structure for Firebase
       - name: Prepare Public Folder
