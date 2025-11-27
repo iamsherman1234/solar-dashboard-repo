@@ -51,7 +51,7 @@ The system relies on three specific Google Drive folders. Do not rename or delet
 | :--- | :--- | :--- |
 | **01_Monitoring_Data** | `1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm` | **Input:** Drop raw Excel/ZIP files here. |
 | **02_Archives** | `19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G` | **Storage:** Processed files are moved here automatically. |
-| **Solar_Project_Master** | `1jhw0lRHwG8ogRCL9g9Qu3RAsN0gkNLPl` | **Output:** Dashboard HTML & Production Excel appear here. |
+| **03_Output** | `1fqRaaM9Zw5NwWdSuc8OFRfiHTeemspK2` | **Output:** Dashboard HTML & Production Excel appear here. |
 
 ## 📁 Project Structure
 
