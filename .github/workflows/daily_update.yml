@@ -36,14 +36,10 @@ jobs:
       # 2. RUN PROCESSING
       - name: Run Processing Scripts
         run: |
-          # Ensure folders exist
           mkdir -p Archives
-          
-          # Run consolidation
-          python sites_table_nogui.py
-          
-          # Run dashboard generation
-          python dashboard_generator.py
+          python sites_table_nogui.py     # 1. Create Data
+          python dashboard_generator.py   # 2. Create PC Dashboard (Old)
+          python mobile_generator.py      # 3. Create Mobile Dashboard (New Add-on)
 
       # 3. UPLOAD RESULTS (Updated with Secrets)
       - name: Drive - Upload & Sync
@@ -58,8 +54,8 @@ jobs:
       - name: Share Dashboard for Hosting
         uses: actions/upload-artifact@v4
         with:
-          name: solar-dashboard-html  # This is the ID we use to catch it later
-          path: installed_sites_dashboard_*.html
+          name: solar-dashboard-build   # Ensure this name matches what deploy_firebase.yml looks for
+          path: mobile_build/           # Upload the FOLDER, not the HTML file
           retention-days: 1
       # 4. PREPARE & RELEASE
       - name: Get Date
