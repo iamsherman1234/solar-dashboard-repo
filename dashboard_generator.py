@@ -63,8 +63,9 @@ def generate_installed_sites_dashboard():
     
     # Connect to database to get additional site information
     try:
-        project_folder = r"C:\Users\chum.layan\OneDrive - Smart Axiata Co., Ltd\Smart\Code\Solar Dashboard"
-        db_path = os.path.join(project_folder, "solar_performance.db")
+        # Use current directory
+        project_folder = Path(__file__).parent.resolve()
+        db_path = project_folder / "solar_performance.db"
         conn = sqlite3.connect(db_path)
         
         # Get site mapping with additional info
@@ -1222,4 +1223,5 @@ def generate_installed_sites_dashboard():
         traceback.print_exc()
 
 if __name__ == "__main__":
+
     generate_installed_sites_dashboard()
