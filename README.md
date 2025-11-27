@@ -1,62 +1,57 @@
 # Solar Performance Dashboard & Automation System
 
 **Version:** 2.0 (Cloud-Native Edition)  
-**Status:** ✅ Automated (Daily at 07:00 AM ICT)
+**Status:** ✅ Automated (Daily 07:00 AM ICT)
 
-A fully automated, cloud-native system for monitoring, analyzing, and visualizing solar performance across **1,770 installations**.  
-The automation is powered by **GitHub Actions** and integrated with **Google Drive** for storage and file synchronization.
+A comprehensive, cloud-automated system for monitoring, analyzing, and visualizing solar site performance across **1,770 installations**. This system leverages **GitHub Actions** for compute and **Google Drive** for storage, automating the entire data pipeline from ingestion to dashboard publication.
 
 ## 📋 Table of Contents
-- Overview & Architecture
-- Features
-- Cloud Configuration (Google Drive)
-- Project Structure
-- Operational Workflow
-- Input Data Specifications
-- Output Artifacts
-- Setup Guide (Deployment)
-- Troubleshooting
-- Technical Details
+
+- [Overview & Architecture](#-overview--architecture)
+- [Features](#-features)
+- [Cloud Configuration](#-cloud-configuration-google-drive)
+- [Project Structure](#-project-structure)
+- [Operational Workflow](#-operational-workflow)
+- [Input Data Specs](#-input-data-specifications)
+- [Output Artifacts](#-output-artifacts)
+- [Setup Guide](#-setup-guide)
+- [Troubleshooting](#-troubleshooting)
+- [Technical Details](#-technical-details)
 
 ## 🎯 Overview & Architecture
 
-This system replaces manual Excel processing with a fully automated CI/CD workflow. It pulls monitoring files from Google Drive, processes them in GitHub Actions, and publishes dashboards and reports back to Drive.
+The system replaces manual local processing with a robust CI/CD pipeline. It automatically ingests raw monitoring data from Google Drive, processes it using Python on GitHub's cloud runners, and uploads the results back to Google Drive and GitHub Releases.
 
-### 🔗 Data Pipeline
-1. **Ingest:** Download new `.xlsx` monitoring files from Google Drive (`01_Monitoring_Data`).
-2. **Restore:** Load historical cache (`monitoring_data_history.parquet`) for fast processing of **2,383+ days**.
-3. **Process:** Clean, consolidate, and compute yield and degradation metrics.
-4. **Visualize:** Generate a serverless, interactive dashboard (HTML).
-5. **Publish:** Upload final reports and archive processed files.
+### The Pipeline
+1.  **Ingest:** Pulls new `.xlsx` monitoring files from **Google Drive (01_Monitoring_Data)**.
+2.  **Restore:** Retrieves the historical data cache (`parquet`) to ensure fast processing of **2,383 days** of history.
+3.  **Process:** Consolidates data, removes duplicates, and calculates yields/degradation metrics.
+4.  **Visualize:** Generates an interactive HTML dashboard.
+5.  **Archive & Publish:** Moves processed files to **02_Archives** and saves reports to **Solar_Project_Master**.
 
 ## ✨ Features
 
 ### ☁️ Cloud Automation
-- Automated daily run at **07:00 AM Phnom Penh Time**.
-- Full read/write Google Drive integration.
-- Self-healing: auto-installs dependencies and restores cache.
-- No servers, laptops, or manual execution required.
+* **Daily Schedule:** Runs automatically at **07:00 AM Phnom Penh Time** (00:00 UTC).
+* **Drive Integration:** Seamless 2-way sync with Google Drive APIs.
+* **Self-Healing:** Auto-installs dependencies and restores historical cache to prevent timeouts.
+* **Zero-Maintenance:** No local server or laptop required for daily operations.
 
 ### 📊 Analytics & Visualization
-- **Specific Yield:** 7-day, 30-day, 90-day, all-time.
-- **Degradation Detection:** Offline site detection & lifecycle degradation checks.
-- **Dashboard Features:**  
-  - Interactive charts  
-  - Search & filters  
-  - Dark mode  
-  - Site drill-down  
-- **Grouping:** Province, Project, Panel Type, Vendor, etc.
+* **Performance Metrics:** 7-day, 30-day, 90-day, and All-time specific yields (kWh/kWp/day).
+* **Degradation Analysis:** Automated detection of offline sites and degradation rates vs. expected lifecycle.
+* **Interactive Dashboard:** Serverless HTML dashboard with Dark Mode, Search, and Drill-down capabilities.
+* **Fleet categorization:** Grouping by Province, Project, Panel Type, and Vendor.
 
 ## ☁️ Cloud Configuration (Google Drive)
 
-The system uses **three controlled folders**.  
-⚠️ **Do not rename or move these without updating `drive_manager.py`.**
+The system relies on three specific Google Drive folders. Do not rename or delete these folders without updating `drive_manager.py`.
 
-| Folder Name | Folder ID | Purpose |
-|------------|-----------|---------|
-| **01_Monitoring_Data** | `1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm` | Raw input files |
-| **02_Archives** | `19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G` | Processed file archive |
-| **Solar_Project_Master** | `1jhw0lRHwG8ogRCL9g9Qu3RAsN0gkNLPl` | Final dashboard & reports |
+| Folder Name | Drive Folder ID | Purpose |
+| :--- | :--- | :--- |
+| **01_Monitoring_Data** | `1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm` | **Input:** Drop raw Excel/ZIP files here. |
+| **02_Archives** | `19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G` | **Storage:** Processed files are moved here automatically. |
+| **Solar_Project_Master** | `1jhw0lRHwG8ogRCL9g9Qu3RAsN0gkNLPl` | **Output:** Dashboard HTML & Production Excel appear here. |
 
 ## 📁 Project Structure
 
@@ -64,17 +59,16 @@ The system uses **three controlled folders**.
 solar-dashboard-repo/
 ├── .github/
 │   └── workflows/
-│       └── daily_monitor.yml        # Automation workflow (runs daily)
+│       └── daily_monitor.yml      # CI/CD: The automation trigger (7AM Daily)
 │
-├── drive_manager.py                 # Google Drive download/upload/sync operations
-├── sites_table_nogui.py             # Data processing engine
-├── dashboard_generator.py           # HTML dashboard builder
-├── solar_installation_info.xlsx     # Site metadata
-├── solar_performance.db             # SQLite: panel & system details
-├── requirements.txt                 # Python dependencies
-└── README.md                        # Documentation
+├── drive_manager.py               # Core: Handles Google Drive Download/Upload/Sync
+├── sites_table_nogui.py           # Core: Data processing & consolidation engine
+├── dashboard_generator.py         # Core: HTML visualization generator
+├── solar_installation_info.xlsx   # Config: Site Metadata (Split, Capacity, etc.)
+├── solar_performance.db           # Config: SQLite database for site details
+├── requirements.txt               # Config: Python dependencies
+└── README.md                      # Documentation
 ```
-
 ## 🔄 Operational Workflow
 
 ### For Data Managers
@@ -151,4 +145,7 @@ Uses:
 - Plotly/HTML templating  
 - Google Drive API  
 - GitHub Actions CI/CD  
+
+**Maintained by:** [LayAn](https://github.com/iamsherman1234)  
+**License:** Proprietary Software
 
