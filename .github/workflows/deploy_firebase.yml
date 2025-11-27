@@ -1,41 +1,60 @@
 name: Deploy to Firebase
 
 on:
-  workflow_dispatch: # Button to run manually
+  workflow_dispatch: # Allows manual run button
   workflow_run:
-    workflows: ["Daily Solar Dashboard"] # <--- MUST MATCH the 'name:' inside daily_update.yml
+    workflows: ["Daily Solar Dashboard"]
     types:
       - completed
 
 jobs:
   deploy-website:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }} # Only run if data processing succeeded
+    # Run if it's a manual click OR if the automatic trigger was successful
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. Catch the HTML file passed from the first workflow
-      # 1. Catch the FOLDER passed from the first workflow
-      - name: Download Dashboard
+      # NEW STEP: Smartly decide which Run ID to use
+      - name: Get Workflow Run ID
+        id: get-run-id
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            # Automatic Mode: Use the ID that triggered this
+            echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            echo "Mode: Automatic (Linked to Run ${{ github.event.workflow_run.id }})"
+          else
+            # Manual Mode: Find the latest successful Dashboard run
+            echo "Mode: Manual - Searching for latest successful run..."
+            LATEST_ID=$(gh run list --workflow "daily_update.yml" --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            
+            if [ -z "$LATEST_ID" ]; then
+              echo "Error: Could not find any successful run of daily_update.yml"
+              exit 1
+            fi
+            
+            echo "run_id=$LATEST_ID" >> $GITHUB_OUTPUT
+            echo "Found latest run: $LATEST_ID"
+          fi
+
+      # Download using the smart ID we just found
+      - name: Download Dashboard Artifact
         uses: actions/download-artifact@v4
         with:
-          name: solar-dashboard-build 
-          path: mobile_build  # Download it to local folder
+          name: solar-dashboard-build
+          path: mobile_build
+          run-id: ${{ steps.get-run-id.outputs.run_id }} # Uses the ID found in the previous step
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. Prepare the folder structure for Firebase
-      - name: Prepare Public Folder
-        run: |
-          mkdir -p public
-          # Rename the long file to index.html so it becomes the homepage
-          mv installed_sites_dashboard_*.html public/index.html
-
-      # 3. Deploy to Firebase
+      # Deploy to Firebase
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           channelId: live
-          projectId: solar-dashboard-f9bee  # <--- REPLACE THIS with your actual Project ID
+          projectId: solar-dashboard-f9bee
