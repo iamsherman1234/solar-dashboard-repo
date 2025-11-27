@@ -1,9 +1,9 @@
 name: Daily Solar Dashboard
 
 on:
-  workflow_dispatch: # Allow manual trigger button
+  workflow_dispatch: # Button to run manually
   schedule:
-    - cron: '0 0 * * *' # 00:00 UTC = 07:00 AM Cambodia (UTC+7)
+    - cron: '0 0 * * *' # 00:00 UTC = 07:00 AM Phnom Penh
 
 permissions:
   contents: write # Needed for Releases
@@ -25,38 +25,52 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # 1. DOWNLOAD DATA FROM GOOGLE DRIVE
+      # 1. DOWNLOAD DATA (Updated with Secrets)
       - name: Drive - Fetch Data
         env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
         run: python drive_manager.py pre
 
-      # 2. RUN YOUR EXISTING SCRIPTS
+      # 2. RUN PROCESSING
       - name: Run Processing Scripts
         run: |
           # Ensure folders exist
           mkdir -p Archives
           
-          # Run consolidation (Moves files to Archives locally)
+          # Run consolidation
           python sites_table_nogui.py
           
           # Run dashboard generation
           python dashboard_generator.py
 
-      # 3. UPLOAD RESULTS BACK TO DRIVE & SYNC ARCHIVES
+      # 3. UPLOAD RESULTS (Updated with Secrets)
       - name: Drive - Upload & Sync
         env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
         run: python drive_manager.py post
 
-      # 4. CREATE GITHUB RELEASE
+      # ... (after Drive Upload step) ...
+
+      # 4. PREPARE & RELEASE
+      - name: Get Date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      # NEW STEP: Zip the files together
+      - name: Zip Output Files
+        run: |
+          # The -j flag (junk paths) stores just the file names, not the folder structure
+          zip -j Solar_Report_${{ steps.date.outputs.date }}.zip installed_sites_production_*.xlsx installed_sites_dashboard_*.html
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: report-${{ github.run_id }}
           name: Solar Report ${{ steps.date.outputs.date }}
-          files: |
-            installed_sites_production_*.xlsx
-            installed_sites_dashboard_*.html
+          files: Solar_Report_${{ steps.date.outputs.date }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
