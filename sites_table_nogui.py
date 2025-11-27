@@ -485,8 +485,8 @@ def build_installed_sites_table(monitoring_folder, metadata_file, output_file=No
 
 def main():
     """Main entry point"""
-    # Define your paths here
-    BASE_PATH = Path(r"C:\Users\chum.layan\OneDrive - Smart Axiata Co., Ltd\Smart\Code\Solar Dashboard")
+    # Use current directory where the script is running
+    BASE_PATH = Path(__file__).parent.resolve()
         # ADD THESE 3 LINES HERE:
     if not check_and_install_requirements():
         print("\n❌ Cannot proceed without required packages. Exiting...")
