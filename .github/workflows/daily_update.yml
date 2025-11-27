@@ -1,82 +1,62 @@
-name: Update Dashboard
+name: Daily Solar Dashboard
 
 on:
+  workflow_dispatch: # Allow manual trigger button
   schedule:
-    - cron: '0 0 * * *'  #'0 0 * * 1'Mondays at 7 AM Cambodia
-  workflow_dispatch:
+    - cron: '0 0 * * *' # 00:00 UTC = 07:00 AM Cambodia (UTC+7)
 
 permissions:
-  contents: write
+  contents: write # Needed for Releases
 
 jobs:
-  build:
+  process-solar-data:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout content
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.9'
+          cache: 'pip'
 
-      - name: Install packages
+      - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Run script
+      # 1. DOWNLOAD DATA FROM GOOGLE DRIVE
+      - name: Drive - Fetch Data
         env:
-          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
-          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
-          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
-        run: python -u main.py
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        run: python drive_manager.py pre
 
-      # --- SMART RELEASE STEP (Checks for file first) ---
-      - name: Prepare Release Artifacts
-        id: check_file
+      # 2. RUN YOUR EXISTING SCRIPTS
+      - name: Run Processing Scripts
         run: |
-          # Check if any HTML dashboard file was created
-          if ls installed_sites_dashboard_*.html 1> /dev/null 2>&1; then
-            echo "File found. Preparing release..."
-            
-            DATE_TAG=$(date +'%Y.%m.%d')
-            echo "TAG_NAME=v$DATE_TAG" >> $GITHUB_ENV
-            
-            HTML_FILE=$(ls installed_sites_dashboard_*.html | head -n 1)
-            cp "$HTML_FILE" "Solar_Dashboard_Report_$DATE_TAG.html"
-            
-            zip "Solar_Dashboard_Report_$DATE_TAG.zip" "Solar_Dashboard_Report_$DATE_TAG.html"
-            
-            echo "RELEASE_ASSET=Solar_Dashboard_Report_$DATE_TAG.zip" >> $GITHUB_ENV
-            echo "HAS_NEW_DATA=true" >> $GITHUB_ENV
-          else
-            echo "No new dashboard generated (No new data)."
-            echo "HAS_NEW_DATA=false" >> $GITHUB_ENV
-          fi
+          # Ensure folders exist
+          mkdir -p Archives
+          
+          # Run consolidation (Moves files to Archives locally)
+          python sites_table_nogui.py
+          
+          # Run dashboard generation
+          python dashboard_generator.py
 
-      # Only run Release if we actually have new data
-      - name: Create Release
-        if: env.HAS_NEW_DATA == 'true'
+      # 3. UPLOAD RESULTS BACK TO DRIVE & SYNC ARCHIVES
+      - name: Drive - Upload & Sync
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        run: python drive_manager.py post
+
+      # 4. CREATE GITHUB RELEASE
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: "Solar Dashboard: ${{ env.TAG_NAME }}"
-          body: "Weekly automated solar performance report."
-          files: ${{ env.RELEASE_ASSET }}
-          draft: false
-          prerelease: false
+          tag_name: report-${{ github.run_id }}
+          name: Solar Report ${{ steps.date.outputs.date }}
+          files: |
+            installed_sites_production_*.xlsx
+            installed_sites_dashboard_*.html
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Only deploy Pages if we have new data
-      - name: Deploy to GitHub Pages
-        if: env.HAS_NEW_DATA == 'true'
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./
-          exclude_assets: '**/*.py,**/*.yml,**/*.txt,**/data/**,.gitignore,README.md,**/*.csv,**/*.xlsx,*.parquet,requirements.txt,*.zip,installed_sites_dashboard_*.html'
-          destination_dir: ./
-          keep_files: false 
-          user_name: 'SolarBot'
-          user_email: 'bot@solar.com'
