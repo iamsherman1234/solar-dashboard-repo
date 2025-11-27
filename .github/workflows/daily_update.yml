@@ -54,7 +54,13 @@ jobs:
         run: python drive_manager.py post
 
       # ... (after Drive Upload step) ...
-
+      # ADD THIS STEP: Upload the HTML so the next workflow can see it
+      - name: Share Dashboard for Hosting
+        uses: actions/upload-artifact@v4
+        with:
+          name: solar-dashboard-html  # This is the ID we use to catch it later
+          path: installed_sites_dashboard_*.html
+          retention-days: 1
       # 4. PREPARE & RELEASE
       - name: Get Date
         id: date
