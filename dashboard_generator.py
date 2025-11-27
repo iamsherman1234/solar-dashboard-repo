@@ -145,9 +145,9 @@ def generate_installed_sites_dashboard():
                 
                 # Calculate expected degradation
                 if years_elapsed <= 1:
-                    expected_degradation = years_elapsed * 1.5
+                    expected_degradation = years_elapsed * 3
                 else:
-                    expected_degradation = 1.5 + (years_elapsed - 1) * 0.4
+                    expected_degradation = 3 + (years_elapsed - 1) * 0.7
                 
                 # Calculate actual degradation
                 actual_degradation = ((initial_95th - latest_95th) / initial_95th * 100) if initial_95th > 0 else 0
@@ -1225,3 +1225,4 @@ def generate_installed_sites_dashboard():
 if __name__ == "__main__":
 
     generate_installed_sites_dashboard()
+
