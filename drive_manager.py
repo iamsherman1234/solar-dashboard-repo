@@ -1,5 +1,4 @@
 import os
-import json
 import io
 import shutil
 from pathlib import Path
@@ -7,22 +6,40 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-# --- YOUR CONFIGURATION ---
+# --- CONFIGURATION ---
 FOLDER_MONITORING = '1ZCVjpjqZ5rnLBhCTZf2yeQbEOX9zeYCm' 
 FOLDER_ARCHIVES = '19AJmzhnlwXI78B0HTNX3mke8sMr-XK1G'   
 FOLDER_OUTPUT = '1jhw0lRHwG8ogRCL9g9Qu3RAsN0gkNLPl'     
 
 def authenticate():
-    creds_json = os.environ.get('GDRIVE_CREDENTIALS')
-    if not creds_json:
-        if os.path.exists('token.json'): # Fallback for local testing
-            creds_json = open('token.json').read()
+    """Authenticates using individual GitHub Secrets for User OAuth"""
+    
+    # Get secrets from environment variables
+    client_id = os.environ.get('GDRIVE_CLIENT_ID')
+    client_secret = os.environ.get('GDRIVE_CLIENT_SECRET')
+    refresh_token = os.environ.get('GDRIVE_REFRESH_TOKEN')
+    
+    # Check if we are running locally with a token.json (Fallback for testing)
+    if not all([client_id, client_secret, refresh_token]):
+        if os.path.exists('token.json'):
+            print("⚠ Using local token.json for authentication")
+            creds = Credentials.from_authorized_user_file('token.json', ['https://www.googleapis.com/auth/drive'])
+            return build('drive', 'v3', credentials=creds)
         else:
-            raise ValueError("GDRIVE_CREDENTIALS not found")
-            
-    creds_dict = json.loads(creds_json)
-    # Load User Credentials (OAuth 2.0)
-    creds = Credentials.from_authorized_user_info(creds_dict)
+            raise ValueError("❌ Missing Environment Variables: GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, or GDRIVE_REFRESH_TOKEN")
+
+    print("✓ Authenticating as User via OAuth...")
+    
+    # Construct Credentials object manually
+    creds = Credentials(
+        None, # Access token (will be refreshed automatically)
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=['https://www.googleapis.com/auth/drive']
+    )
+    
     return build('drive', 'v3', credentials=creds)
 
 def download_monitoring_data(service):
@@ -43,6 +60,7 @@ def download_monitoring_data(service):
         print("No new files found in Drive.")
     
     for item in items:
+        # Check for Excel files
         if item['name'].endswith('.xlsx') or 'spreadsheet' in item['mimeType']:
             print(f"Downloading: {item['name']}")
             request = service.files().get_media(fileId=item['id'])
@@ -126,27 +144,32 @@ def upload_outputs(service):
                 fileId=existing[0]['id'],
                 media_body=media
             ).execute()
+            print(f"Updated existing file: {local_file.name}")
         else:
-            # Create new file (This uses YOUR storage quota now!)
+            # Create new file (Uses YOUR storage quota now)
             service.files().create(
                 body=file_metadata,
                 media_body=media,
                 fields='id'
             ).execute()
+            print(f"Created new file: {local_file.name}")
 
 if __name__ == "__main__":
     import sys
-    step = sys.argv[1] # 'pre' or 'post'
+    # Default to 'pre' if no argument provided
+    step = sys.argv[1] if len(sys.argv) > 1 else "pre"
     
     srv = authenticate()
     
     if step == "pre":
         download_history(srv)
         files = download_monitoring_data(srv)
+        # Save list of downloaded files to json to check later
         with open('downloaded_files.json', 'w') as f:
             json.dump(files, f)
             
     elif step == "post":
+        # Load manifest
         if os.path.exists('downloaded_files.json'):
             with open('downloaded_files.json', 'r') as f:
                 files = json.load(f)
