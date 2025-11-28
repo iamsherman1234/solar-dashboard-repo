@@ -282,6 +282,58 @@ def generate_mobile_site():
         with open(data_dir / f"{sid}.json", 'w') as f:
             json.dump({'meta': meta, 'hist': daily_hist}, f)
 
+
+    # ============================================================================
+    # PREPARE CHART DATA (NEW SECTION - INSERT HERE)
+    # ============================================================================
+    print("  Preparing chart data...")
+
+    # 1. Grid Access Distribution
+    grid_access_stats = df['Grid Access'].fillna('Unknown').value_counts().to_dict()
+
+    # 2. Power Sources Distribution  
+    power_sources_stats = df['Power Sources'].fillna('Unknown').value_counts().to_dict()
+
+    # 3. Performance Distribution (by category)
+    perf_distribution = {
+        'Excellent': len([s for s in site_metadata.values() if s['cat'] == 'Excellent']),
+        'Good': len([s for s in site_metadata.values() if s['cat'] == 'Good']),
+        'Fair': len([s for s in site_metadata.values() if s['cat'] == 'Fair']),
+        'Poor': len([s for s in site_metadata.values() if s['cat'] == 'Poor'])
+    }
+
+    # 4. Commissioning Timeline (cumulative)
+    commissioning_timeline = []
+    comm_dates = []
+    for sid, meta in site_metadata.items():
+        if meta['comm'] != 'N/A':
+            try:
+                comm_dates.append(pd.to_datetime(meta['comm']))
+            except:
+                pass
+
+    if comm_dates:
+        comm_dates_sorted = sorted(comm_dates)
+        date_counts = pd.Series(comm_dates_sorted).value_counts().sort_index()
+        cumulative = 0
+        for date, count in date_counts.items():
+            cumulative += count
+            commissioning_timeline.append({
+                'date': date.strftime('%Y-%m-%d'),
+                'count': int(count),
+                'cumulative': cumulative
+            })
+
+    # Update chart_data dictionary with new charts
+    chart_data.update({
+        'grid_access': grid_access_stats,
+        'power_sources': power_sources_stats,
+        'perf_dist': perf_distribution,
+        'commissioning_timeline': commissioning_timeline
+    })
+
+    print(f"  ✓ Chart data prepared")
+
     # 6. Aggregates
     provinces = df.groupby('Province_Full')['Avg_Yield_30d_kWh_kWp'].mean().to_dict()
     projects = df.groupby('Project')['Avg_Yield_30d_kWh_kWp'].mean().to_dict()
@@ -350,6 +402,8 @@ def generate_mobile_site():
     <div class="tab" onclick="nav('perf')">Categories</div>
 </div>
 
+# In the html = f"""...""" block, replace the entire <div id="overview"> ... </div> section with:
+
 <div id="overview" class="page active">
     <div class="grid">
         <div class="card" style="border-left: 4px solid var(--blue)">
@@ -365,11 +419,52 @@ def generate_mobile_site():
              <div class="big-num">{fleet_stats['online_sites']} / {fleet_stats['total_sites']}</div>
         </div>
     </div>
-    <div class="card"><h3>Performance Dist.</h3><canvas id="distChart" height="200"></canvas></div>
-    <div class="card" style="margin-top:1rem"><h3>Commissioning</h3><canvas id="commChart" height="200"></canvas></div>
-    <div class="grid" style="margin-top:1rem">
-        <div class="card"><h4>Grid Access</h4><canvas id="gridChart" height="150"></canvas></div>
-        <div class="card"><h4>Power Sources</h4><canvas id="powerChart" height="150"></canvas></div>
+    
+    <!-- Performance Distribution Chart -->
+    <div class="card" style="margin-top:1rem">
+        <h3>Performance Distribution</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem">
+            <div>
+                <canvas id="perfDistChart" height="200"></canvas>
+            </div>
+            <div style="display:flex; flex-direction:column; justify-content:center; gap:0.5rem; font-size:0.9rem">
+                <div style="display:flex; justify-content:space-between; padding:0.5rem; background:rgba(39,174,96,0.1); border-radius:6px">
+                    <span><b>Excellent</b> (>4.5)</span>
+                    <span style="font-weight:bold; color:var(--green)">{perf_distribution['Excellent']}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:0.5rem; background:rgba(52,152,219,0.1); border-radius:6px">
+                    <span><b>Good</b> (3.5-4.5)</span>
+                    <span style="font-weight:bold; color:var(--blue)">{perf_distribution['Good']}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:0.5rem; background:rgba(243,156,18,0.1); border-radius:6px">
+                    <span><b>Fair</b> (2.5-3.5)</span>
+                    <span style="font-weight:bold; color:#f39c12">{perf_distribution['Fair']}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; padding:0.5rem; background:rgba(231,76,60,0.1); border-radius:6px">
+                    <span><b>Poor</b> (<2.5)</span>
+                    <span style="font-weight:bold; color:var(--red)">{perf_distribution['Poor']}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Grid Access & Power Sources Charts -->
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem">
+        <div class="card">
+            <h3>Grid Access</h3>
+            <canvas id="gridChart" height="180"></canvas>
+        </div>
+        <div class="card">
+            <h3>Power Sources</h3>
+            <canvas id="powerChart" height="180"></canvas>
+        </div>
+    </div>
+    
+    <!-- Commissioning Timeline -->
+    <div class="card" style="margin-top:1rem">
+        <h3>Commissioning Timeline</h3>
+        <div style="font-size:0.85rem; opacity:0.7; margin-bottom:0.5rem">Cumulative sites commissioned over time</div>
+        <canvas id="commChart" height="200"></canvas>
     </div>
 </div>
 
@@ -421,7 +516,7 @@ def generate_mobile_site():
     const charts = {json.dumps(chart_data)};
     const provs = {json.dumps(provinces)};
     const projs = {json.dumps(projects)};
-    const dist = {json.dumps(fleet_stats['perf_dist'])};
+    const dist = {json.dumps(perf_distribution)};
     
     const $ = id => document.getElementById(id);
     const siteArr = Object.values(sites);
@@ -558,24 +653,92 @@ def generate_mobile_site():
     
     function closeModal() {{ $('modal').classList.remove('open'); }}
 
-    function initCharts() {{
-        new Chart($('distChart'), {{
+    function initCharts() {
+        // 1. Performance Distribution Donut
+        new Chart($('perfDistChart'), {
             type: 'doughnut',
-            data: {{ labels: Object.keys(dist), datasets: [{{ data: Object.values(dist), backgroundColor:['#27ae60','#3498db','#f39c12','#e74c3c'] }}] }}
-        }});
-        new Chart($('gridChart'), {{
+            data: {
+                labels: Object.keys(dist),
+                datasets: [{
+                    data: Object.values(dist),
+                    backgroundColor: ['#27ae60', '#3498db', '#f39c12', '#e74c3c'],
+                    borderWidth: 2,
+                    borderColor: '#fff'
+                }]
+            },
+            options: {
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                }
+            }
+        });
+    
+        // 2. Grid Access Pie
+        new Chart($('gridChart'), {
             type: 'pie',
-            data: {{ labels: Object.keys(charts.grid_access), datasets: [{{ data: Object.values(charts.grid_access), backgroundColor:['#3498db','#9b59b6','#e67e22','#2ecc71'] }}] }}
-        }});
-        new Chart($('powerChart'), {{
+            data: {
+                labels: Object.keys(charts.grid_access),
+                datasets: [{
+                    data: Object.values(charts.grid_access),
+                    backgroundColor: ['#3498db', '#27ae60', '#f39c12', '#e74c3c', '#9b59b6']
+                }]
+            },
+            options: {
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 10 } } }
+                }
+            }
+        });
+    
+        // 3. Power Sources Pie
+        new Chart($('powerChart'), {
             type: 'pie',
-            data: {{ labels: Object.keys(charts.power_sources), datasets: [{{ data: Object.values(charts.power_sources), backgroundColor:['#e74c3c','#f1c40f','#34495e'] }}] }}
-        }});
-        new Chart($('commChart'), {{
-            type: 'line',
-            data: {{ labels: Object.keys(charts.commissioning), datasets: [{{ label:'Sites', data: Object.values(charts.commissioning), borderColor:'#3498db', pointRadius:0 }}] }}
-        }});
-    }}
+            data: {
+                labels: Object.keys(charts.power_sources),
+                datasets: [{
+                    data: Object.values(charts.power_sources),
+                    backgroundColor: ['#e74c3c', '#3498db', '#27ae60', '#f39c12']
+                }]
+            },
+            options: {
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 10 } } }
+                }
+            }
+        });
+    
+        // 4. Commissioning Timeline Line
+        if (charts.commissioning_timeline && charts.commissioning_timeline.length > 0) {
+            new Chart($('commChart'), {
+                type: 'line',
+                data: {
+                    labels: charts.commissioning_timeline.map(x => x.date.slice(5)),
+                    datasets: [{
+                        label: 'Total Sites',
+                        data: charts.commissioning_timeline.map(x => x.cumulative),
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52,152,219,0.1)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 2,
+                        pointHoverRadius: 5
+                    }]
+                },
+                options: {
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { beginAtZero: true }
+                    },
+                    plugins: {
+                    legend: { display: false }
+                    }
+                }
+            });
+        }
+    }
 
     init();
 </script>
