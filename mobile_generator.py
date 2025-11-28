@@ -71,7 +71,101 @@ def generate_mobile_site():
 
     # 5. Global Stats Containers
     site_metadata = {}
+
+    # Add this section after the site_metadata loop (around line 120)
+    # This replaces the simplified degradation logic
+
+    # ============================================================================
+    # DEGRADATION ANALYSIS (Matching dashboard_generator.py logic)
+    # ============================================================================
+
+    print("  Calculating degradation metrics...")
+    degradation_data = []
+
+    for sid, meta in site_metadata.items():
+        if sid not in df.index:
+            continue
     
+        row = df.loc[sid] if isinstance(df.loc[sid], pd.Series) else df.loc[sid].iloc[0]
+        size = meta['kwp']
+    
+        if size <= 0:
+            continue
+    
+        # Get first production date
+        first_date_str = meta['comm']
+        if first_date_str == 'N/A' or not pd.notna(first_date_str):
+            continue
+    
+        try:
+            first_date = pd.to_datetime(first_date_str)
+        except:
+            continue
+    
+        # Define commissioning month and last month periods
+        commissioning_month_start = first_date
+        commissioning_month_end = first_date + pd.DateOffset(months=1)
+    
+        last_month_start = latest_date - pd.DateOffset(months=1)
+        last_month_end = latest_date
+    
+        # Filter date columns for each period
+        commissioning_cols = [c for c in date_cols 
+                             if commissioning_month_start <= col_to_date[c] < commissioning_month_end]
+        last_month_cols = [c for c in date_cols 
+                          if last_month_start <= col_to_date[c] <= last_month_end]
+    
+        # Calculate 95th percentile for each period
+        if commissioning_cols and last_month_cols:
+            commissioning_values = [safe_get(row, col) for col in commissioning_cols 
+                                   if safe_get(row, col) > 0]
+            last_month_values = [safe_get(row, col) for col in last_month_cols 
+                                if safe_get(row, col) > 0]
+        
+            if commissioning_values and last_month_values:
+                initial_95th = np.percentile(commissioning_values, 95) / size
+                latest_95th = np.percentile(last_month_values, 95) / size
+            
+                # Calculate years elapsed
+                years_elapsed = (latest_date - first_date).days / 365.25
+            
+                # Calculate expected degradation
+                # Year 1: 3% per year, After year 1: 0.7% per year
+                if years_elapsed <= 1:
+                    expected_degradation = years_elapsed * 3
+                else:
+                    expected_degradation = 3 + (years_elapsed - 1) * 0.7
+            
+                # Calculate actual degradation
+                actual_degradation = ((initial_95th - latest_95th) / initial_95th * 100) if initial_95th > 0 else 0
+            
+                # Calculate performance vs expected
+                performance_vs_expected = expected_degradation - actual_degradation
+            
+                # Update metadata with degradation info
+                meta['deg_act'] = round(actual_degradation, 1)
+                meta['deg_exp'] = round(expected_degradation, 1)
+                meta['deg_perf_vs_exp'] = round(performance_vs_expected, 1)
+                meta['initial_yield_95th'] = round(initial_95th, 2)
+                meta['latest_yield_95th'] = round(latest_95th, 2)
+                meta['years_elapsed'] = round(years_elapsed, 1)
+            
+                # Categorize degradation (only if online)
+                if meta['online']:
+                    if actual_degradation > 50:
+                        meta['deg_cat'] = 'High'
+                    elif actual_degradation >= 30:
+                        meta['deg_cat'] = 'Medium'
+                    elif actual_degradation >= 0:
+                        meta['deg_cat'] = 'Low'
+                    else:
+                        meta['deg_cat'] = 'Better'
+                # else: deg_cat already set to 'Offline' earlier
+
+    # Update site_metadata back to the main dictionary
+    site_metadata[sid] = meta
+
+    print(f"  ✓ Degradation analysis complete")
     # Aggregators
     fleet_stats = {
         'total_sites': len(df),
