@@ -24,7 +24,7 @@ def get_province_full_name(abbrev):
 
 def generate_mobile_site():
     print("="*70)
-    print("FULL-FEATURED MOBILE GENERATOR (OPTIMIZED)")
+    print("FULL-FEATURED MOBILE GENERATOR (LAYOUT FIXED)")
     print("="*70)
     
     scripts_folder = Path(__file__).parent.resolve()
@@ -90,8 +90,10 @@ def generate_mobile_site():
 
     # Timeline Logic
     comm_dates = pd.to_datetime(df['First_Production_Date'], errors='coerce').dropna().sort_values()
-    chart_data['commissioning'] = comm_dates.groupby(comm_dates).size().cumsum().to_dict()
-    chart_data['commissioning'] = {k.strftime('%Y-%m-%d'): v for k,v in chart_data['commissioning'].items()}
+    if not comm_dates.empty:
+        # Create a timeline grouped by month to reduce points and make chart smoother
+        chart_data['commissioning'] = comm_dates.groupby(comm_dates).size().cumsum().to_dict()
+        chart_data['commissioning'] = {k.strftime('%Y-%m-%d'): v for k,v in chart_data['commissioning'].items()}
 
     print(f"  Processing {len(df)} sites...")
 
@@ -100,7 +102,7 @@ def generate_mobile_site():
         size = safe_get(row, 'Array_Size_kWp')
         if size <= 0: continue
 
-        # Determine Panel Description (Logic from Dashboard Generator)
+        # Panel Logic
         panel_desc = str(row.get('Panel_Description', ''))
         if panel_desc == 'nan' or not panel_desc:
             p_size = str(int(safe_get(row, 'Panel Size'))) if safe_get(row, 'Panel Size') > 0 else 'Unknown'
@@ -119,15 +121,10 @@ def generate_mobile_site():
             'grid': str(row.get('Grid Access', 'N/A')),
             'src': str(row.get('Power Sources', 'N/A')),
             'comm': str(row.get('First_Production_Date', 'N/A')),
-            
-            # Default Degradation Values
             'deg_cat': 'Unknown',
             'deg_act': 0,
             'deg_exp': 0,
-            'perf_vs_exp': 0,
             'online': False,
-            
-            # Additional Stats needed for lists
             'years': 0
         }
         
@@ -139,7 +136,7 @@ def generate_mobile_site():
         meta['cat'] = cat
         fleet_stats['perf_dist'][cat] += 1
 
-        # Check Offline (Last 3 days 0) - Matches dashboard_generator logic
+        # Check Offline
         recent_cols = date_cols[:3] if len(date_cols) >= 3 else date_cols
         is_online = any(safe_get(row, d) > 0 for d in recent_cols)
         meta['online'] = is_online
@@ -150,7 +147,7 @@ def generate_mobile_site():
             fleet_stats['critical_alerts'] += 1
             meta['deg_cat'] = 'Offline'
 
-        # DEGRADATION CALCULATION (Matches Dashboard Generator Math)
+        # Degradation Logic
         if is_online and pd.notna(row['First_Production_Date']):
             try:
                 first_date = pd.to_datetime(row['First_Production_Date'])
@@ -167,61 +164,44 @@ def generate_mobile_site():
                 if c_vals and l_vals:
                     init_95 = np.percentile(c_vals, 95) / size
                     curr_95 = np.percentile(l_vals, 95) / size
-                    
                     years = (latest_date - first_date).days / 365.25
                     meta['years'] = round(years, 1)
                     
-                    # Exact formula from dashboard_generator
-                    if years <= 1:
-                        expected = years * 3
-                    else:
-                        expected = 3 + (years - 1) * 0.7
+                    if years <= 1: expected = years * 3
+                    else: expected = 3 + (years - 1) * 0.7
                         
                     actual = ((init_95 - curr_95) / init_95 * 100) if init_95 > 0 else 0
-                    perf_vs = expected - actual
                     
                     meta['deg_act'] = round(actual, 1)
                     meta['deg_exp'] = round(expected, 1)
-                    meta['perf_vs_exp'] = round(perf_vs, 1)
-                    meta['init_yield'] = round(init_95, 2)
-                    meta['curr_yield'] = round(curr_95, 2)
                     
                     if actual > 50: meta['deg_cat'] = 'High'
                     elif actual >= 30: meta['deg_cat'] = 'Medium'
                     elif actual >= 0: meta['deg_cat'] = 'Low'
                     else: meta['deg_cat'] = 'Better'
-            except:
-                pass
+            except: pass
 
         site_metadata[sid] = meta
 
-        # HEAVY DATA -> SEPARATE JSON FILE (Optimization)
+        # JSON Data Export
         daily_hist = []
         for d in date_cols:
             if pd.notna(row[d]):
                 val = float(row[d])
-                daily_hist.append({
-                    'd': d, 
-                    'v': val, 
-                    'y': round(val/size, 2) if size else 0
-                })
+                daily_hist.append({'d': d, 'v': val, 'y': round(val/size, 2) if size else 0})
         
-        # Only save last 365 days to save space on mobile
         daily_hist = daily_hist[:365] 
-        
         with open(data_dir / f"{sid}.json", 'w') as f:
             json.dump({'meta': meta, 'hist': daily_hist}, f)
 
-    # 6. Aggregates for Categorization views
+    # 6. Aggregates
     provinces = df.groupby('Province_Full')['Avg_Yield_30d_kWh_kWp'].mean().to_dict()
     projects = df.groupby('Project')['Avg_Yield_30d_kWh_kWp'].mean().to_dict()
-    # ADDED: Panel grouping to match PC dashboard
     panels = df.groupby('Panel_Description')['Avg_Yield_30d_kWh_kWp'].mean().to_dict()
     
     # 7. Generate HTML
     print("  Generating Mobile HTML...")
     
-    # Embed the LIGHTWEIGHT metadata, not the heavy history
     json_metadata = json.dumps(site_metadata)
     json_charts = json.dumps(chart_data)
     json_provs = json.dumps(provinces)
@@ -239,18 +219,14 @@ def generate_mobile_site():
     <style>
         :root {{ --bg: #f4f6f8; --card: #fff; --text: #333; --blue: #3498db; --green: #27ae60; --red: #e74c3c; --yellow: #f39c12; }}
         [data-theme="dark"] {{ --bg: #1a1a1a; --card: #2d3748; --text: #e0e0e0; }}
-        
         body {{ font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding-bottom: 80px; -webkit-tap-highlight-color: transparent; }}
         
-        /* Navigation */
         .header {{ background: linear-gradient(135deg, #2c3e50, #3498db); color: white; padding: 1rem; position: sticky; top: 0; z-index: 50; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        .header-top {{ display: flex; justify-content: space-between; align-items: center; }}
         .tabs {{ display: flex; overflow-x: auto; background: var(--card); padding: 0.5rem; gap: 0.5rem; border-bottom: 1px solid #ddd; position: sticky; top: 60px; z-index: 40; scrollbar-width: none; }}
         .tabs::-webkit-scrollbar {{ display: none; }}
         .tab {{ padding: 8px 16px; border-radius: 20px; white-space: nowrap; cursor: pointer; background: var(--bg); color: var(--text); font-weight: 500; font-size: 0.9rem; border: 1px solid transparent; }}
         .tab.active {{ background: var(--blue); color: white; }}
         
-        /* Layout */
         .page {{ display: none; padding: 1rem; animation: fadeIn 0.3s; }}
         .page.active {{ display: block; }}
         @keyframes fadeIn {{ from {{ opacity:0 }} to {{ opacity:1 }} }}
@@ -259,17 +235,14 @@ def generate_mobile_site():
         .card {{ background: var(--card); padding: 1rem; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
         .big-num {{ font-size: 1.8rem; font-weight: bold; margin: 0.5rem 0; }}
         
-        /* Site List Items */
         .site-item {{ background: var(--card); padding: 1rem; margin-bottom: 0.5rem; border-radius: 12px; border-left: 5px solid #ccc; cursor: pointer; transition: transform 0.1s; position: relative; }}
         .site-item:active {{ transform: scale(0.98); }}
         .badg {{ padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; color: white; float: right; font-weight: bold; margin-left: 10px; }}
         
-        /* Modal */
         .modal {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 100; overflow-y: auto; }}
         .modal.open {{ display: block; }}
         .modal-content {{ background: var(--card); margin: 1rem auto; width: 95%; max-width: 800px; border-radius: 16px; overflow: hidden; min-height: 50vh; }}
         
-        /* Colors */
         .c-exc {{ border-color: var(--green) !important; }} .bg-exc {{ background: var(--green); }}
         .c-good {{ border-color: var(--blue) !important; }} .bg-good {{ background: var(--blue); }}
         .c-fair {{ border-color: var(--yellow) !important; }} .bg-fair {{ background: var(--yellow); }}
@@ -277,14 +250,17 @@ def generate_mobile_site():
         
         .deg-btn {{ flex: 1; text-align: center; font-size: 0.8rem; padding: 8px 4px; }}
         .search-bar {{ width:100%; padding:14px; border-radius:12px; border:1px solid #ccc; margin-bottom:1rem; font-size:16px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); box-sizing:border-box; background: var(--card); color: var(--text); }}
-        
         .cat-header {{ margin-top: 1.5rem; margin-bottom: 0.5rem; font-size: 1.1rem; color: var(--blue); border-bottom: 2px solid var(--blue); display: inline-block; padding-bottom: 4px; }}
+        
+        /* FIX: Ensure chart containers have fixed height so maintainAspectRatio: false works */
+        .chart-container {{ position: relative; height: 250px; width: 100%; }}
+        .chart-container-sm {{ position: relative; height: 180px; width: 100%; }}
     </style>
 </head>
 <body>
 
 <div class="header">
-    <div class="header-top">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
         <div>
             <h2 style="margin:0; font-size: 1.4rem;">Solar Fleet</h2>
             <div style="font-size:0.8rem; opacity:0.8; margin-top:2px">{fleet_stats['total_sites']} Sites • {int(fleet_stats['capacity'])} kWp</div>
@@ -316,12 +292,33 @@ def generate_mobile_site():
         </div>
     </div>
     
-    <div class="card"><h3>Performance Distribution</h3><canvas id="distChart" height="200"></canvas></div>
-    <div class="card" style="margin-top:1rem"><h3>Commissioning Timeline</h3><canvas id="commChart" height="200"></canvas></div>
+    <div class="card">
+        <h3>Performance Distribution</h3>
+        <div class="chart-container">
+            <canvas id="distChart"></canvas>
+        </div>
+    </div>
+    
+    <div class="card" style="margin-top:1rem">
+        <h3>Commissioning Timeline</h3>
+        <div class="chart-container">
+            <canvas id="commChart"></canvas>
+        </div>
+    </div>
     
     <div class="grid" style="margin-top:1rem">
-        <div class="card"><h4>Grid Access</h4><canvas id="gridChart" height="150"></canvas></div>
-        <div class="card"><h4>Power Sources</h4><canvas id="powerChart" height="150"></canvas></div>
+        <div class="card">
+            <h4>Grid Access</h4>
+            <div class="chart-container-sm">
+                <canvas id="gridChart"></canvas>
+            </div>
+        </div>
+        <div class="card">
+            <h4>Power Sources</h4>
+            <div class="chart-container-sm">
+                <canvas id="powerChart"></canvas>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -372,7 +369,7 @@ def generate_mobile_site():
         
         <div style="padding:1rem; overflow-y: auto; max-height: 80vh;">
             <div class="grid">
-                <div class="card"><small>Specific Yield (30d)</small><b id="m-y30" style="display:block; font-size:1.4rem"></b></div>
+                <div class="card"><small>Yield (30d)</small><b id="m-y30" style="display:block; font-size:1.4rem"></b></div>
                 <div class="card"><small>Array Size</small><b id="m-kwp" style="display:block; font-size:1.4rem"></b></div>
             </div>
             
@@ -381,16 +378,15 @@ def generate_mobile_site():
             </div>
             
             <h4 style="margin-bottom:0.5rem">Daily Production (kWh)</h4>
-            <div style="height:200px; position:relative;"><canvas id="m-chart"></canvas></div>
+            <div class="chart-container-sm"><canvas id="m-chart"></canvas></div>
             
             <h4 style="margin-top:1.5rem; margin-bottom:0.5rem">Specific Yield Trend (kWh/kWp)</h4>
-            <div style="height:200px; position:relative;"><canvas id="m-yield-chart"></canvas></div>
+            <div class="chart-container-sm"><canvas id="m-yield-chart"></canvas></div>
         </div>
     </div>
 </div>
 
 <script>
-    // Embed lightweight metadata only
     const sites = {json_metadata};
     const charts = {json_charts};
     const provs = {json_provs};
@@ -447,7 +443,6 @@ def generate_mobile_site():
             fil = fil.filter(s => s.cat === currentFilter);
         }}
 
-        // Limit to 50 items for DOM performance unless searching
         const displayLimit = currentSearch.length > 0 ? 100 : 50;
         const totalFound = fil.length;
         fil = fil.slice(0, displayLimit);
@@ -474,15 +469,12 @@ def generate_mobile_site():
         else if(type==='Low') $('btn-low').classList.add('active');
         else $('btn-better').classList.add('active');
 
-        let list = [];
-        let html = '';
+        let list = siteArr.filter(s => s.deg_cat === type);
         
-        list = siteArr.filter(s => s.deg_cat === type);
-        
-        // Sort: High numbers first for Offline/High, low for Better
         if(type === 'Better') list.sort((a,b) => a.deg_act - b.deg_act);
         else list.sort((a,b) => b.deg_act - a.deg_act);
 
+        let html = '';
         if(list.length === 0) html += '<div style="text-align:center; padding:2rem; opacity:0.6">No sites in this category</div>';
 
         list.forEach(s => {{
@@ -491,7 +483,7 @@ def generate_mobile_site():
              if(type==='Offline' || type==='High') color = 'poor';
              if(type==='Low' || type==='Better') color = 'good';
              
-             let sub = type==='Offline' ? 'Check connectivity (No data 3 days)' : 
+             let sub = type==='Offline' ? 'Check connectivity' : 
                        `Exp: ${{s.deg_exp}}% • Act: ${{s.deg_act}}% (${{s.years}} yrs)`;
 
              if(type==='Better') sub = `Improving: ${{Math.abs(s.deg_act)}}% better than install`;
@@ -522,7 +514,6 @@ def generate_mobile_site():
         $('panel-grid').innerHTML = gen(panels);
     }}
 
-    // LAZY LOADING: Fetch specific site JSON only when clicked
     async function openModal(id) {{
         const s = sites[id];
         $('modal').classList.add('open');
@@ -537,31 +528,26 @@ def generate_mobile_site():
             <div>Proj: <b>${{s.proj}}</b></div>
             <div>Comm: <b>${{s.comm}}</b></div>
             <div>Src: <b>${{s.src}}</b></div>
-            <div>Load: <b>${{s.load || '-'}} kW</b></div>
+            <div>Deg: <b>${{s.deg_act}}%</b></div>
         `;
         
-        // Clear previous charts
         if(myChart1) myChart1.destroy();
         if(myChart2) myChart2.destroy();
         
-        // Show loading state in canvas areas
         const ctx1 = $('m-chart').getContext('2d');
         ctx1.clearRect(0,0,300,150);
         ctx1.fillText("Loading data...", 10, 50);
 
         try {{
-            // FETCH INDIVIDUAL FILE
             const res = await fetch(`site_data/${{id}}.json`);
             if(!res.ok) throw new Error("Data not found");
             const data = await res.json();
-            
-            // Only show last 90 days for better mobile view
             const hist = data.hist.slice(-90);
 
             myChart1 = new Chart($('m-chart'), {{
                 type: 'bar',
                 data: {{
-                    labels: hist.map(x => x.d.slice(5)), // MM-DD
+                    labels: hist.map(x => x.d.slice(5)),
                     datasets: [{{ label:'Prod (kWh)', data:hist.map(x=>x.v), backgroundColor:'#3498db' }}]
                 }},
                 options: {{ maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
@@ -572,19 +558,16 @@ def generate_mobile_site():
                 data: {{
                     labels: hist.map(x => x.d.slice(5)),
                     datasets: [{{ 
-                        label:'Yield', 
-                        data:hist.map(x=>x.y), 
-                        borderColor:'#27ae60', 
-                        tension:0.3, 
-                        pointRadius:1, 
-                        fill: true,
-                        backgroundColor: 'rgba(39, 174, 96, 0.1)'
+                        label:'Yield', data:hist.map(x=>x.y), 
+                        borderColor:'#27ae60', tension:0.3, pointRadius:1, 
+                        fill: true, backgroundColor: 'rgba(39, 174, 96, 0.1)'
                     }}]
                 }},
                 options: {{ maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
             }});
         }} catch(e) {{
-            alert("Could not load detailed history for this site.");
+            console.error(e);
+            alert("Could not load detailed history.");
             closeModal();
         }}
     }}
@@ -597,20 +580,34 @@ def generate_mobile_site():
             data: {{ labels: Object.keys(dist), datasets: [{{ data: Object.values(dist), backgroundColor:['#27ae60','#3498db','#f39c12','#e74c3c'] }}] }},
             options: {{ responsive: true, maintainAspectRatio: false }}
         }});
+        
         new Chart($('gridChart'), {{
             type: 'pie',
             data: {{ labels: Object.keys(charts.grid_access), datasets: [{{ data: Object.values(charts.grid_access), backgroundColor:['#3498db','#9b59b6','#e67e22','#2ecc71'] }}] }},
             options: {{ maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
         }});
+        
         new Chart($('powerChart'), {{
             type: 'pie',
             data: {{ labels: Object.keys(charts.power_sources), datasets: [{{ data: Object.values(charts.power_sources), backgroundColor:['#e74c3c','#f1c40f','#34495e'] }}] }},
             options: {{ maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
         }});
+        
+        // Sorting dates for Commissioning Chart
+        const commKeys = Object.keys(charts.commissioning).sort();
+        const commVals = commKeys.map(k => charts.commissioning[k]);
+
         new Chart($('commChart'), {{
             type: 'line',
-            data: {{ labels: Object.keys(charts.commissioning), datasets: [{{ label:'Sites', data: Object.values(charts.commissioning), borderColor:'#3498db', pointRadius:0 }}] }},
-            options: {{ maintainAspectRatio: false, scales: {{ x: {{ ticks: {{ display: false }} }} }} }}
+            data: {{ 
+                labels: commKeys, 
+                datasets: [{{ label:'Total Sites', data: commVals, borderColor:'#3498db', pointRadius:0, borderWidth:2, fill:true, backgroundColor:'rgba(52, 152, 219, 0.1)' }}] 
+            }},
+            options: {{ 
+                maintainAspectRatio: false,
+                scales: {{ x: {{ ticks: {{ maxTicksLimit: 10, maxRotation: 0 }} }} }},
+                plugins: {{ legend: {{ display: false }} }}
+            }}
         }});
     }}
 
