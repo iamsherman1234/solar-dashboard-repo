@@ -1,10 +1,21 @@
 {
   "hosting": {
-    "public": "mobile_build",  
+    "public": "mobile_build",
     "ignore": [
       "firebase.json",
       "**/.*",
       "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "**/*.json",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=3600"
+          }
+        ]
+      }
     ]
   }
 }
